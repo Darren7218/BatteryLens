@@ -10,11 +10,17 @@ android {
         applicationId 'com.darren.batterylens'
         minSdk 28
         targetSdk 36
-        versionCode 3
-        versionName '2.1'
+        versionCode 4
+        versionName '3.0'
+        resValue 'string', 'app_name', 'BatteryLens'
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix '.preview'
+            versionNameSuffix '-preview'
+            resValue 'string', 'app_name', 'BatteryLens Preview'
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -25,4 +31,9 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
 }

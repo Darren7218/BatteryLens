@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="app_bg">#0F1115</color>
-    <color name="card_bg">#191C22</color>
+    <color name="app_bg">#09141A</color>
+    <color name="card_bg">#13242C</color>
     <color name="text_primary">#F5F7FA</color>
     <color name="text_secondary">#AAB2BF</color>
-    <color name="accent">#79E2A0</color>
+    <color name="accent">#6DEBD1</color>
 </resources>

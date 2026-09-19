@@ -19,12 +19,12 @@ final class BatteryReadings {
     final long energyNwh;
     final long chargeTimeMs;
     final int cycles;
-    final int deviceSoh;
+    final String cycleSource;
 
     private BatteryReadings(double soc, int tempTenthC, int voltageMv, int health,
                             int status, int plugged, int chargeUah, int currentNowUa,
                             int currentAvgUa, long energyNwh, long chargeTimeMs,
-                            int cycles, int deviceSoh) {
+                            int cycles, String cycleSource) {
         this.soc = soc;
         this.tempTenthC = tempTenthC;
         this.voltageMv = voltageMv;
@@ -37,7 +37,7 @@ final class BatteryReadings {
         this.energyNwh = energyNwh;
         this.chargeTimeMs = chargeTimeMs;
         this.cycles = cycles;
-        this.deviceSoh = deviceSoh;
+        this.cycleSource = cycleSource;
     }
 
     static BatteryReadings read(Context context) {
@@ -54,10 +54,12 @@ final class BatteryReadings {
         int status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN);
         int plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
 
-        int chargeUah = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER);
-        int currentNow = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
-        int currentAvg = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE);
-        long energyNwh = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER);
+        int chargeUah = safeInt(bm, BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER);
+        int currentNow = safeInt(bm, BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+        int currentAvg = safeInt(bm, BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE);
+        long energyNwh;
+        try { energyNwh = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER); }
+        catch (RuntimeException ignored) { energyNwh = Long.MIN_VALUE; }
         long chargeTimeMs;
         try {
             chargeTimeMs = bm.computeChargeTimeRemaining();
@@ -70,53 +72,32 @@ final class BatteryReadings {
             cycles = battery.getIntExtra(BatteryManager.EXTRA_CYCLE_COUNT, -1);
         }
 
-        int deviceSoh = -1;
-
-// State-of-Health uses battery property ID 10 internally.
-// The named public constant was removed from the stable Android SDK,
-// so don't reference BatteryManager.BATTERY_PROPERTY_STATE_OF_HEALTH.
-        if (Build.VERSION.SDK_INT >= 34) {
-            try {
-                final int BATTERY_PROPERTY_STATE_OF_HEALTH_COMPAT = 10;
-
-                int soh = bm.getIntProperty(
-                        BATTERY_PROPERTY_STATE_OF_HEALTH_COMPAT
-                );
-
-                // Reject unsupported / obviously invalid values.
-                if (soh >= 50 && soh <= 120) {
-                    deviceSoh = soh;
-                }
-            } catch (SecurityException | IllegalArgumentException e) {
-                deviceSoh = -1;
-            } catch (Throwable ignored) {
-                deviceSoh = -1;
-            }
+        // No stable public SDK contract for SoH: never infer it from a hidden numeric ID.
+        if (cycles < 0 || cycles > 100000) cycles = -1;
+        String cycleSource = cycles >= 0 ? "Android battery broadcast" : "Not exposed";
+        CycleReader.Result fallback = CycleReader.cached();
+        if ((cycles < 0 && fallback.count >= 0) || (cycles == 0 && fallback.count > 0)) {
+            cycles = fallback.count;
+            cycleSource = fallback.source;
         }
-
         return new BatteryReadings(soc, temp, voltage, health, status, plugged,
-                chargeUah, currentNow, currentAvg, energyNwh, chargeTimeMs, cycles, deviceSoh);
+                chargeUah, currentNow, currentAvg, energyNwh, chargeTimeMs, cycles, cycleSource);
+    }
+
+    private static int safeInt(BatteryManager manager, int property) {
+        try { return manager.getIntProperty(property); }
+        catch (RuntimeException ignored) { return Integer.MIN_VALUE; }
     }
 
     boolean hasUsableCounter() {
-        return chargeUah != Integer.MIN_VALUE && chargeUah > 0;
+        return chargeUah != Integer.MIN_VALUE && chargeUah > 0 && chargeUah <= 30_000_000;
     }
 
     boolean isPlugged() {
         return plugged != 0;
     }
 
-    boolean isChargingLike() {
-        return status == BatteryManager.BATTERY_STATUS_CHARGING
-                || status == BatteryManager.BATTERY_STATUS_FULL
-                || isPlugged();
-    }
-
-    boolean hasValidDeviceSoh() {
-        return deviceSoh >= 50 && deviceSoh <= 120;
-    }
-
-    double temperatureC() {
+    double temperatureC() {https://chatgpt.com/s/t_6aaea37e2bc48191804d1c6adffecb16
         return tempTenthC == Integer.MIN_VALUE ? Double.NaN : tempTenthC / 10.0;
     }
 

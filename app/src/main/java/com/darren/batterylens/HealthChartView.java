@@ -21,10 +21,10 @@ final class HealthChartView extends View {
         super(context);
         grid.setColor(Color.rgb(64, 70, 82));
         grid.setStrokeWidth(dp(1));
-        line.setColor(Color.rgb(121, 226, 160));
+        line.setColor(Color.rgb(109, 235, 209));
         line.setStyle(Paint.Style.STROKE);
         line.setStrokeWidth(dp(2.5f));
-        point.setColor(Color.rgb(121, 226, 160));
+        point.setColor(Color.rgb(109, 235, 209));
         label.setColor(Color.rgb(170, 178, 191));
         label.setTextSize(dp(11));
         setMinimumHeight(dp(170));
@@ -39,6 +39,7 @@ final class HealthChartView extends View {
                 if (s.used && s.fccMah > 0) health.add(100.0 * s.fccMah / designMah);
             }
         }
+        setContentDescription(health.isEmpty() ? "No eligible sessions to chart" : health.size() + " eligible session estimates. Values are listed in recent sessions.");
         invalidate();
     }
 
@@ -53,7 +54,7 @@ final class HealthChartView extends View {
 
         if (health.isEmpty()) {
             label.setTextAlign(Paint.Align.CENTER);
-            c.drawText("Health trend appears after calibration sessions", w / 2f, h / 2f, label);
+            c.drawText("Complete a monitored charge to begin", w / 2f, h / 2f, label);
             label.setTextAlign(Paint.Align.LEFT);
             return;
         }
@@ -63,8 +64,8 @@ final class HealthChartView extends View {
             min = Math.min(min, v - 4);
             max = Math.max(max, v + 4);
         }
-        min = Math.max(40, Math.floor(min / 5.0) * 5.0);
-        max = Math.min(130, Math.ceil(max / 5.0) * 5.0);
+        min = Math.floor(min / 5.0) * 5.0;
+        max = Math.ceil(max / 5.0) * 5.0;
         if (max - min < 20) max = min + 20;
 
         double[] guides = {80, 90, 100};

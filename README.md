@@ -1,88 +1,88 @@
-# BatteryLens 2.1
+# BatteryLens 3.0
 
-BatteryLens is a lightweight Android battery-health monitor focused on measurement quality rather than fake precision.
+An offline Android battery monitor with transparent capacity estimates, device compatibility diagnostics, and a lightweight native UI. Supports Android 9+; includes a Galaxy S24 FE rated-capacity preset.
 
-## What changed in 2.1
+## What changed
 
-- **Automatic calibration:** a charge session starts on power-connect and closes on power-disconnect, even when the app is not open.
-- **No permanent background service:** automatic tracking uses Android's power broadcasts instead of constant polling.
-- **Android 16 State of Health:** uses `BATTERY_PROPERTY_STATE_OF_HEALTH` when the device exposes a sane value.
-- **Filtered multi-session estimate:** repeated charge sessions are combined with a robust median and obvious outliers are filtered.
-- **Confidence score:** increases when several accepted sessions agree closely.
-- **Health trend chart:** shows recent accepted calibration estimates.
-- **Charging session history:** most recent sessions show SOC range, measured full-charge capacity, health %, quality, and whether the session affected the estimate.
-- **Charging insights:** battery-side charging power, temperature, cycle count, and Android's time-to-full estimate.
-- **Copy diagnostics:** one tap copies raw BatteryLens readings for troubleshooting/tuning.
-- **Legacy migration:** calibration values from BatteryLens 1.0 are imported automatically.
-- **Refreshed UI:** cleaner dark cards, improved metric tiles, clearer calibration controls, and better information hierarchy.
-- **New app icon:** custom adaptive launcher icon with Android themed-icon support.
+- User-enabled foreground monitoring with an ongoing notification and Stop action. Battery broadcasts plus a once-per-minute checkpoint while running replace the unreliable manifest-only plug/unplug assumption. The visible dashboard refreshes every five seconds.
+- Charging progress survives process interruptions. A reboot or a monitoring gap over ten minutes ends the previous segment at its last observed charging checkpoint, never at a later discharge reading.
+- Capacity estimates require 30%+ gained, at least four observations, 10 minutes to 18 hours of continuous observation, temperatures within 10–42°C, and plausible counter values. Invalid/short sessions stay visible with reasons.
+- Fixed non-finite temperature/capacity JSON handling so a missing sensor cannot silently truncate saved records.
+- Removed the undocumented numeric State-of-Health property lookup and snapshot-based headline health. The headline waits for monitored data; snapshot capacity remains diagnostic only.
+- Reports lifetime cycles from Android's public extra or a readable, explicitly named cycle-count file. Shows the source and explains unavailable/placeholder-zero readings. No root, shell commands, hidden API access, or guessed OEM units.
+- Separately records **observed equivalent cycles** from small continuous unplugged SOC drops. This excludes unmonitored time and is never labeled as lifetime cycle count.
+- Optional charge-target notifications (70/80/85/90/100%) and a 42°C temperature notification. The app cannot stop charging.
+- Three tabs: Overview, Sessions, Settings. New live gauge, responsive metric cards, monitoring progress, adaptive lens/lightning icon, and themed-icon support.
+- Export retained sessions as CSV using Android's document picker; clear history with confirmation; copy detailed device diagnostics.
+- Compatible Gradle 8.11.1 wrapper for AGP 8.9.1, executable wrapper, and GitHub Actions build/lint workflow.
 
-## How automatic calibration works
+## Start monitoring on a Galaxy S24 FE
 
-1. Leave **Automatic calibration** enabled (it is on by default).
-2. Plug the phone in normally. BatteryLens stores the starting state-of-charge and Android charge counter.
-3. Unplug normally. BatteryLens compares the ending charge counter and state-of-charge.
-4. Sessions gaining at least 20 percentage points can be kept as history; **30%+ sessions are eligible for the health estimate**.
-5. Longer sessions are rated higher. A roughly 20% → 80% charge is an excellent calibration run and works fine with Samsung Battery Protection.
-6. The app uses recent accepted sessions, rejects obvious outliers, then takes a median to reduce one-off fuel-gauge error.
+1. Open BatteryLens and enable **Automatic monitoring**. Allow notifications so status and alerts remain visible.
+2. If needed, open **Settings → Open Android app settings**, set battery usage to **Unrestricted**, and remove BatteryLens from Samsung Sleeping/Deep sleeping apps. Labels vary by One UI version.
+3. Charge normally across 30+ percentage points. A 20→80% charge is useful and works with Battery Protection. There is no need to drain to zero or charge to 100%.
+4. Unplug and check **Sessions**. The app uses its last observed connected checkpoint; rejected sessions explain why they were excluded. Judge the trend after at least three long sessions.
+5. After rebooting or force-stopping the app, open it again to resume. Android can still suspend or terminate monitoring; the app does not claim guaranteed collection while stopped.
 
-Nothing needs to stay open while charging.
+New installations start with monitoring off. Existing automatic-mode preferences are preserved. The monitor stays enabled while unplugged so it can detect the next charging session; stop it from the switch or notification. No wake lock or exact alarm is used. If Android sleeps long enough to miss checkpoints, incomplete segments may be retained without contributing to health.
 
-## Health calculation priority
+## Capacity and health
 
-1. **Android 16 device-reported State of Health**, if exposed by the phone.
-2. **Filtered median of accepted automatic/manual charge sessions.**
-3. **Snapshot estimate** (`charge counter / SOC`) only as a low-confidence fallback until better data exists.
+`full capacity (mAh) = (ending charge µAh − starting charge µAh) / (10 × percentage points gained)`
 
-## Galaxy S24 FE default
+`estimated health (%) = full capacity / rated baseline × 100`
 
-For model `SM-S721*`, BatteryLens pre-fills **4565 mAh rated capacity**. Samsung lists 4700 mAh typical and 4565 mAh rated. The rated value is the correct baseline for a State-of-Health percentage.
+The estimate uses up to 16 recent eligible sessions, a median, and MAD-based outlier filtering. **Repeatability describes agreement between sessions, not certified accuracy.** A fuel gauge may derive its charge counter from SOC, so these measurements are not necessarily independent. Neither calibration sessions nor this app reset/recalibrate battery hardware.
 
-## Live readings
+S24 FE models `SM-S721*` prefill **4565 mAh rated**; Samsung advertises 4700 mAh typical. A small result over 100% is possible because rated and typical capacity differ. The baseline is editable. Old history is preserved, but pre-3.0 sessions are history-only because they do not carry the new validation data.
 
-Depending on what the phone firmware exposes, BatteryLens can show:
+## Why some phones show cycles and others do not
 
-- Battery level and Android battery-health state
-- Temperature and voltage
-- Remaining charge counter (mAh)
-- Instantaneous and average battery current
-- Estimated battery-side charging wattage (`|current| × voltage`)
-- Remaining energy counter
-- Cycle count on Android 14+
-- Android time-to-full estimate
-- State of Health on Android 16 when exposed
+Android 14 added `BatteryManager.EXTRA_CYCLE_COUNT`, but firmware determines what is supplied. BatteryLens first reads it, then can check these ordinary-app-readable files:
 
-Battery-side charging power is **not** the same as charger/wall wattage because conversion losses and phone power consumption are outside this measurement.
+- `/sys/class/power_supply/battery/cycle_count`
+- `/sys/class/power_supply/bms/cycle_count`
+- `/sys/class/power_supply/battery/charge_cycles`
 
-## Privacy and battery impact
+Permission denial/missing files are normal. The app never fabricates a lifetime count from battery health. A reported zero is shown with a caveat because firmware may publish a default zero. An accessible positive file count can take precedence over that zero. OEM fields with undocumented scaling are intentionally not interpreted.
 
-- No internet permission
-- No ads
-- No analytics
-- No foreground service
-- No scheduled polling
-- Calibration/session data is stored locally in `SharedPreferences`
+Use **Settings → Check compatibility → Copy device diagnostics** to report your model, Android version, public readings, probe results, and monitor/notification state. Observed cycles in the other tile count only the SOC drops the app actually sees; they are an approximate lower-coverage usage record, not lifetime history.
 
-`RECEIVE_BOOT_COMPLETED` is used only to recover automatic calibration state after a reboot while charging.
+## Privacy
 
-## Build / install
+No internet permission, accounts, ads or analytics. Data stays in device-local SharedPreferences; automatic Android backup is disabled because calibration and lifetime-cycle context belong to one battery. CSV export writes only to a location selected by the user.
 
-1. Install a current Android Studio version.
-2. Open the `BatteryLens` project folder.
-3. Allow Android Studio to install Android SDK 36 and required Gradle components if prompted.
-4. Connect the phone with Developer options + USB debugging enabled.
-5. Press **Run** and choose the phone.
+Foreground service permissions support visible monitoring. Notification permission supports monitoring status and optional alerts. Boot reception only closes the last checkpoint and marks monitoring as needing reopening. The `specialUse` foreground-service declaration explains battery monitoring; publishing on Google Play may require review of that use case.
 
-Project settings:
+## Build and test
 
-- `compileSdk 36`
-- `targetSdk 36`
-- `minSdk 28`
-- Java 17
-- Android Gradle Plugin 8.9.1
+Use JDK 17 and Android SDK 36 with build tools 35.0.0. Open this project in Android Studio or run:
 
-## Accuracy caveat
+```sh
+bash tools/test-core.sh
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+```
 
-BatteryLens can only use information Android/OEM firmware exposes to ordinary apps. Charge-counter behavior, cycle-count availability, and direct State of Health support vary between devices. A service-centre diagnostic can have access to lower-level fuel-gauge information that third-party apps cannot access.
+Debug/preview builds install as **BatteryLens Preview** (`com.darren.batterylens.preview`) alongside the existing app, with separate data. Release builds retain `com.darren.batterylens`.
 
-For calibration-based health, judge the result after **3+ long sessions**, not from a single run.
+The debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. CI also uploads it as `BatteryLens-debug`. Debug builds are for testing. Updating the production installation requires the original signing key. Use the existing release key for a production update.
+
+See [device acceptance checks](docs/TESTING.md) for S24 FE testing, including screen-off charging, reboot, notification denial and CSV export.
+
+## Platform references
+
+- [BatteryManager API and units](https://developer.android.com/reference/android/os/BatteryManager)
+- [Android 8 background and broadcast restrictions](https://developer.android.com/about/versions/oreo/background)
+- [Foreground-service types and specialUse](https://developer.android.com/develop/background-work/services/fgs/service-types)
+- [Foreground-service background-start restrictions](https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start)
+
+### SDK-only preview build
+
+If Gradle dependencies cannot be downloaded, this app has no runtime library dependencies and can also be packaged directly with the official Android SDK tools:
+
+```sh
+# Set JAVA_HOME to JDK 17 and ANDROID_HOME to the Android SDK first.
+python3 tools/build-preview.py
+```
+
+This compiles resources with AAPT2, compiles Java against Android 36, converts bytecode with D8, aligns and test-signs the APK. The result is `app/build/outputs/apk/preview/BatteryLens-3.0-preview.apk`. It does not replace Gradle lint or physical-device testing. The test key stays in ignored build output; keep it locally to update a previously installed preview. Never use this key for a production release.
