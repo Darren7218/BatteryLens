@@ -27,14 +27,14 @@ with tempfile.TemporaryDirectory(prefix='batterylens-build-') as tmp:
     work = Path(tmp)
     res = work / 'res'
     shutil.copytree(PROJECT / 'app/src/main/res', res)
-    (res / 'values' / 'generated.xml').write_text('<resources><string name="app_name">BatteryLens Preview</string></resources>')
+    (res / 'values' / 'generated.xml').write_text('<resources><string name="app_name">BatteryLens 3.4 Preview</string></resources>')
     ns = 'http://schemas.android.com/apk/res/android'
     ET.register_namespace('android', ns)
     manifest = ET.parse(PROJECT / 'app/src/main/AndroidManifest.xml')
     root = manifest.getroot()
     root.set('package', 'com.darren.batterylens')
-    root.set('{' + ns + '}versionCode', '4')
-    root.set('{' + ns + '}versionName', '3.0-preview')
+    root.set('{' + ns + '}versionCode', '8')
+    root.set('{' + ns + '}versionName', '3.4-preview')
     ET.SubElement(root, 'uses-sdk', {'{' + ns + '}minSdkVersion': '28', '{' + ns + '}targetSdkVersion': '36'})
     application = root.find('application')
     application.set('{' + ns + '}debuggable', 'true')
@@ -47,7 +47,7 @@ with tempfile.TemporaryDirectory(prefix='batterylens-build-') as tmp:
     run(BUILD / 'aapt2', 'compile', '--dir', res, '-o', work / 'resources.zip')
     generated = work / 'generated'; generated.mkdir()
     run(BUILD / 'aapt2', 'link', '-I', ANDROID, '--manifest', work / 'AndroidManifest.xml',
-        '--rename-manifest-package', 'com.darren.batterylens.preview',
+        '--rename-manifest-package', 'com.darren.batterylens.preview33',
         '--java', generated, '-o', work / 'unsigned.apk', work / 'resources.zip')
     classes = work / 'classes'; classes.mkdir()
     sources = list((PROJECT / 'app/src/main/java').rglob('*.java')) + list(generated.rglob('*.java'))
@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='batterylens-build-') as tmp:
         run(JAVA / 'keytool', '-genkeypair', '-keystore', key, '-storepass', 'android',
             '-alias', 'androiddebugkey', '-keypass', 'android', '-keyalg', 'RSA', '-keysize', '2048',
             '-validity', '3650', '-dname', 'CN=BatteryLens Preview,O=Android,C=US')
-    output = OUT / 'BatteryLens-3.0-preview.apk'
+    output = OUT / 'BatteryLens-3.4-preview.apk'
     run(JAVA / 'java', '-jar', BUILD / 'lib' / 'apksigner.jar', 'sign', '--ks', key,
         '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', output, work / 'aligned.apk')
     run(JAVA / 'java', '-jar', BUILD / 'lib' / 'apksigner.jar', 'verify', '--verbose', output)

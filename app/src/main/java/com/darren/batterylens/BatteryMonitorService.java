@@ -24,8 +24,8 @@ public class BatteryMonitorService extends Service {
     static volatile boolean starting;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean registered;
-    private boolean targetAlerted;
-    private boolean heatAlerted;
+    private final AlertRules alertRules = new AlertRules();
+    private String alertConfiguration = "";
     private final BroadcastReceiver batteryReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent intent) { sample(); }
     };
@@ -50,6 +50,11 @@ public class BatteryMonitorService extends Service {
     @Override public void onCreate() {
         super.onCreate();
         CalibrationStore.breakCycleContinuity(this);
+        android.content.SharedPreferences prefs = getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE);
+        alertRules.targetSent = prefs.getBoolean("alert_target_sent", false);
+        alertRules.heatSent = prefs.getBoolean("alert_heat_sent", false);
+        alertRules.lowSent = prefs.getBoolean("alert_low_sent", false);
+        alertConfiguration = prefs.getString("alert_configuration", "");
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel(CHANNEL, "Battery monitoring", NotificationManager.IMPORTANCE_LOW));
         manager.createNotificationChannel(new NotificationChannel(ALERTS, "Charge and temperature alerts", NotificationManager.IMPORTANCE_DEFAULT));
@@ -85,22 +90,32 @@ public class BatteryMonitorService extends Service {
         if (!CalibrationStore.isAutoEnabled(this) && !CalibrationStore.hasActive(this)) { stopSelf(); return; }
         BatteryReadings r = BatteryReadings.read(this);
         CalibrationStore.observe(this, r);
+        TrendStore.observe(this, r);
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.notify(100, notification(r));
         if (r == null) return;
-        int target = getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).getInt("charge_target", 80);
-        boolean alerts = getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).getBoolean("alerts", false);
-        if (!r.isPlugged() || r.soc < target - 2) targetAlerted = false;
-        if (r.temperatureC() < 39) heatAlerted = false;
-        if (!alerts) return;
-        if (r.isPlugged() && r.soc >= target && !targetAlerted) {
-            alert(101, "Charge target reached", "Battery is at " + Math.round(r.soc) + "%. You can unplug when convenient.");
-            targetAlerted = true;
+        android.content.SharedPreferences prefs = getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE);
+        int target = prefs.getInt("charge_target", 80);
+        int heat = prefs.getInt("heat_target", 42);
+        int low = prefs.getInt("low_target", 0);
+        boolean enabled = prefs.getBoolean("alerts", false);
+        String configuration = target + ":" + heat + ":" + low + ":" + enabled;
+        if (!configuration.equals(alertConfiguration)) {
+            alertRules.targetSent = alertRules.heatSent = alertRules.lowSent = false;
+            alertConfiguration = configuration;
         }
-        if (r.temperatureC() >= 42 && !heatAlerted) {
-            alert(102, "Battery is getting warm", "Battery temperature is " + Math.round(r.temperatureC()) + "°C. Consider pausing charging or heavy use.");
-            heatAlerted = true;
-        }
+        // Do not latch undelivered alerts when Android notifications are blocked.
+        if (!enabled || !manager.areNotificationsEnabled()) return;
+        NotificationChannel channel = manager.getNotificationChannel(ALERTS);
+        if (channel != null && channel.getImportance() == NotificationManager.IMPORTANCE_NONE) return;
+        int events = alertRules.evaluate(r.soc, r.temperatureC(), r.isPlugged(), target, heat, low);
+        if ((events & 1) != 0) alert(101, "Charge target reached", "Battery is at " + Math.round(r.soc) + "%. You can unplug when convenient.");
+        if ((events & 2) != 0) alert(102, "Battery temperature alert", "Battery temperature is " + Math.round(r.temperatureC()) + "°C. Your selected threshold is " + heat + "°C.");
+        if ((events & 4) != 0) alert(103, "Low battery", "Battery is at " + Math.round(r.soc) + "%. Consider charging soon.");
+        prefs.edit().putBoolean("alert_target_sent", alertRules.targetSent)
+                .putBoolean("alert_heat_sent", alertRules.heatSent)
+                .putBoolean("alert_low_sent", alertRules.lowSent)
+                .putString("alert_configuration", configuration).apply();
     }
 
     private PendingIntent openApp() {

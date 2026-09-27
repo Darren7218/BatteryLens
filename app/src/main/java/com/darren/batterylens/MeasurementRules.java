@@ -1,9 +1,52 @@
 package com.darren.batterylens;
 
+import java.util.List;
+
 /** Pure measurement rules. No device APIs, clocks, storage, or UI. */
 final class MeasurementRules {
     static final long MAX_GAP_MS = 10 * 60_000L;
-    static final long MAX_SESSION_MS = 18 * 60 * 60_000L;
+    // Charging time excludes a recognized long hold at the phone's protection limit.
+    static final long MAX_SESSION_MS = 48 * 60 * 60_000L;
+
+    static final class ChargePoint {
+        final double soc;
+        final long uah;
+        ChargePoint(double soc, long uah) { this.soc = soc; this.uah = uah; }
+    }
+
+    static final class CapacityFit {
+        final double mah;
+        final double relativeSpread;
+        final int pairs;
+        CapacityFit(double mah, double relativeSpread, int pairs) {
+            this.mah = mah; this.relativeSpread = relativeSpread; this.pairs = pairs;
+        }
+    }
+
+    static CapacityFit fitCapacity(List<ChargePoint> points) {
+        return CapacityEstimator.fit(points);
+    }
+
+    static boolean forwardProgress(double peakSoc, long peakUah, double soc, long uah) {
+        return validSoc(soc) && soc > peakSoc && uah > peakUah;
+    }
+
+    /** Android does not expose the user's OEM charge-protection setting to ordinary apps.
+     * Auto recognizes common stop levels only after charging actually stops.
+     */
+    static int pausedLimit(int selectedLimit, double peakSoc, boolean chargeStopped) {
+        if (!chargeStopped || !validSoc(peakSoc)) return -1;
+        if (selectedLimit >= 50 && selectedLimit <= 100)
+            return Math.abs(peakSoc - selectedLimit) <= 1 ? selectedLimit : -1;
+        for (int limit : new int[]{80, 85, 90, 95, 100})
+            if (Math.abs(peakSoc - limit) <= 1) return limit;
+        return -1;
+    }
+
+    static int nextCustomStopCount(int candidate, int priorCandidate, int priorCount) {
+        if (candidate < 50 || candidate >= 100) return 0;
+        return Math.abs(candidate - priorCandidate) <= 1 ? Math.min(2, priorCount + 1) : 1;
+    }
 
     static boolean continuous(long previousElapsed, long nowElapsed, int previousBoot, int boot) {
         return previousBoot == boot && nowElapsed >= previousElapsed
@@ -27,6 +70,13 @@ final class MeasurementRules {
         if (!Double.isFinite(minTemp) || !Double.isFinite(maxTemp)) return "Temperature unavailable";
         if (minTemp < 10 || maxTemp > 42) return "Temperature outside 10–42°C";
         if (design > 0 && (fcc < design * 0.45 || fcc > design * 1.35)) return "Capacity outside plausible range";
+        return "";
+    }
+
+    static String fitRejection(CapacityFit fit, int reversals) {
+        if (fit == null) return "Too few independent charge levels";
+        if (fit.relativeSpread > 0.15) return "Charge counter disagreed across the session";
+        if (reversals >= 3) return "Charging repeatedly reversed under load";
         return "";
     }
 

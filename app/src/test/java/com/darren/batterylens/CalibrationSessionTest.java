@@ -44,9 +44,30 @@ public class CalibrationSessionTest {
         CalibrationStore.Session s = new CalibrationStore.Session();
         s.fccMah = 4565; s.minTemp = 25; s.maxTemp = 35; s.samples = 61;
         s.source = "auto"; s.used = true; s.reason = "Charger disconnected";
+        s.endpointFccMah = 3860; s.fitSpread = .035; s.fitPairs = 38;
+        s.reversals = 1; s.pausedMs = 7200000; s.chargeDurationMs = 3600000;
+        s.hotspotMarked = true; s.plugType = 2; s.startVoltageMv = 3800; s.endVoltageMv = 4200;
         CalibrationStore.Session restored = CalibrationStore.Session.fromJson(s.toJson());
         assertTrue(restored.used);
         assertEquals(25, restored.minTemp, .01);
         assertEquals(35, restored.maxTemp, .01);
+        assertEquals(3860, restored.endpointFccMah, .01);
+        assertEquals(.035, restored.fitSpread, .001);
+        assertEquals(38, restored.fitPairs);
+        assertEquals(1, restored.reversals);
+        assertEquals(7200000, restored.pausedMs);
+        assertEquals(3600000, restored.durationMs());
+        assertTrue(restored.hotspotMarked);
+        assertEquals(2, restored.plugType);
+        assertEquals(3800, restored.startVoltageMv);
+        assertEquals(4200, restored.endVoltageMv);
+    }
+
+    @Test public void oldLowEndpointSessionRemainsVisibleButNoLongerDrivesHealth() throws Exception {
+        CalibrationStore.Session restored = CalibrationStore.Session.fromJson(
+                new JSONObject("{\"v\":3,\"fcc\":3100,\"used\":true,\"ss\":20,\"es\":90,\"src\":\"auto\"}"));
+        assertEquals(3100, restored.fccMah, .01);
+        assertFalse(restored.used);
+        assertTrue(restored.reason.contains("Earlier endpoint"));
     }
 }

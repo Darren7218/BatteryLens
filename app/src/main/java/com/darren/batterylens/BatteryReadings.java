@@ -47,7 +47,7 @@ final class BatteryReadings {
 
         int level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
         int scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
-        double soc = level >= 0 && scale > 0 ? (100.0 * level / scale) : -1;
+        double soc = level >= 0 && scale > 0 && level <= scale ? (100.0 * level / scale) : -1;
         int temp = battery.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
         int voltage = battery.getIntExtra(BatteryManager.EXTRA_VOLTAGE, Integer.MIN_VALUE);
         int health = battery.getIntExtra(BatteryManager.EXTRA_HEALTH, BatteryManager.BATTERY_HEALTH_UNKNOWN);
@@ -97,7 +97,7 @@ final class BatteryReadings {
         return plugged != 0;
     }
 
-    double temperatureC() {https://chatgpt.com/s/t_6aaea37e2bc48191804d1c6adffecb16
+    double temperatureC() {
         return tempTenthC == Integer.MIN_VALUE ? Double.NaN : tempTenthC / 10.0;
     }
 

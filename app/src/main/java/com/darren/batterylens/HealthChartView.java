@@ -16,6 +16,9 @@ final class HealthChartView extends View {
     private final Paint point = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint label = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final List<Double> health = new ArrayList<>();
+    private List<CalibrationStore.Session> lastSessions;
+    private float lastDesign = Float.NaN;
+    private int lastDays = -1;
 
     HealthChartView(Context context) {
         super(context);
@@ -31,14 +34,22 @@ final class HealthChartView extends View {
     }
 
     void setData(List<CalibrationStore.Session> sessions, float designMah) {
+        setData(sessions, designMah, 0);
+    }
+
+    void setData(List<CalibrationStore.Session> sessions, float designMah, int days) {
+        if (lastSessions == sessions && lastDesign == designMah && lastDays == days) return;
+        lastSessions = sessions; lastDesign = designMah; lastDays = days;
         health.clear();
+        long cutoff = days <= 0 ? Long.MIN_VALUE : System.currentTimeMillis() - days * 86_400_000L;
         if (designMah > 0 && sessions != null) {
-            int start = Math.max(0, sessions.size() - 12);
-            for (int i = start; i < sessions.size(); i++) {
+            for (int i = 0; i < sessions.size(); i++) {
                 CalibrationStore.Session s = sessions.get(i);
-                if (s.used && s.fccMah > 0) health.add(100.0 * s.fccMah / designMah);
+                if (s.used && s.fccMah > 0 && s.endTime >= cutoff)
+                    health.add(100.0 * s.fccMah / designMah);
             }
         }
+        while (health.size() > 12) health.remove(0);
         setContentDescription(health.isEmpty() ? "No eligible sessions to chart" : health.size() + " eligible session estimates. Values are listed in recent sessions.");
         invalidate();
     }
