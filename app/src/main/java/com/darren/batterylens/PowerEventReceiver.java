@@ -4,9 +4,29 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 
-/** A reboot ends continuity. Starting a foreground monitor again requires opening the app. */
+/** Closes interrupted pre-reboot segments and automatically resumes monitoring if enabled. */
 public class PowerEventReceiver extends BroadcastReceiver {
+    private static final String QUICKBOOT = "android.intent.action.QUICKBOOT_POWERON";
+    private static final String HTC_QUICKBOOT = "com.htc.intent.action.QUICKBOOT_POWERON";
+
     @Override public void onReceive(Context context, Intent intent) {
-        if (intent != null && Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) CalibrationStore.onBoot(context);
+        if (context == null || intent == null) return;
+        String action = intent.getAction();
+        boolean bootAction = Intent.ACTION_BOOT_COMPLETED.equals(action)
+                || QUICKBOOT.equals(action)
+                || HTC_QUICKBOOT.equals(action);
+        boolean packageReplaced = Intent.ACTION_MY_PACKAGE_REPLACED.equals(action);
+        if (!bootAction && !packageReplaced) return;
+
+        if (bootAction) {
+            // Enqueued onto AppWorker FIFO before the service's first sample runs.
+            CalibrationStore.onBootAsync(context);
+        }
+        if (CalibrationStore.isAutoEnabled(context)) {
+            // Call synchronously inside onReceive to retain BOOT_COMPLETED / MY_PACKAGE_REPLACED exemptions.
+            BatteryMonitorService.startFromBackground(context);
+            MonitorWatchdogJobService.schedule(context);
+        }
+        BatteryWidgetUpdater.updateAllIfPinnedAsync(context);
     }
 }

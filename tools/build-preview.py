@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a side-by-side preview with the official SDK/JDK, without Gradle downloads.
 
-Requires ANDROID_HOME, JAVA_HOME, Python 3, SDK platform 36 and build-tools 35.0.0.
+Requires ANDROID_HOME, JAVA_HOME, Python 3, SDK platform 37 (or 36) and build-tools 36.0.0 (or 35.0.0).
 No runtime libraries are used by BatteryLens. For production builds, use Gradle.
 """
 import os
@@ -15,8 +15,11 @@ import zipfile
 PROJECT = Path(__file__).resolve().parents[1]
 SDK = Path(os.environ['ANDROID_HOME'])
 JAVA = Path(os.environ['JAVA_HOME']) / 'bin'
-BUILD = SDK / 'build-tools' / '35.0.0'
-ANDROID = SDK / 'platforms' / 'android-36' / 'android.jar'
+BUILD = next((SDK / 'build-tools' / v for v in ('36.0.0', '35.0.0') if (SDK / 'build-tools' / v).exists()),
+             SDK / 'build-tools' / '36.0.0')
+ANDROID = next((SDK / 'platforms' / p / 'android.jar' for p in ('android-37', 'android-37.0', 'android-36')
+                if (SDK / 'platforms' / p / 'android.jar').exists()),
+               SDK / 'platforms' / 'android-37' / 'android.jar')
 OUT = PROJECT / 'app' / 'build' / 'outputs' / 'apk' / 'preview'
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -35,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix='batterylens-build-') as tmp:
     root.set('package', 'com.darren.batterylens')
     root.set('{' + ns + '}versionCode', '8')
     root.set('{' + ns + '}versionName', '3.4-preview')
-    ET.SubElement(root, 'uses-sdk', {'{' + ns + '}minSdkVersion': '28', '{' + ns + '}targetSdkVersion': '36'})
+    ET.SubElement(root, 'uses-sdk', {'{' + ns + '}minSdkVersion': '24', '{' + ns + '}targetSdkVersion': '37'})
     application = root.find('application')
     application.set('{' + ns + '}debuggable', 'true')
     # Keep class names attached to the namespace when the application ID is renamed.
@@ -55,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='batterylens-build-') as tmp:
     run(JAVA / 'jar', 'cf', work / 'classes.jar', '-C', classes, '.')
     dex = work / 'dex'; dex.mkdir()
     run(JAVA / 'java', '-cp', BUILD / 'lib' / 'd8.jar', 'com.android.tools.r8.D8',
-        '--lib', ANDROID, '--min-api', '28', '--output', dex, work / 'classes.jar')
+        '--lib', ANDROID, '--min-api', '24', '--output', dex, work / 'classes.jar')
     with zipfile.ZipFile(work / 'unsigned.apk', 'a', compression=zipfile.ZIP_DEFLATED) as apk:
         for item in dex.glob('*.dex'):
             apk.write(item, item.name)

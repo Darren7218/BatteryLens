@@ -4,12 +4,12 @@ plugins {
 
 android {
     namespace 'com.darren.batterylens'
-    compileSdk 36
+    compileSdk 37
 
     defaultConfig {
         applicationId 'com.darren.batterylens'
-        minSdk 28
-        targetSdk 36
+        minSdk 24
+        targetSdk 37
         versionCode 8
         versionName '3.4'
         resValue 'string', 'app_name', 'BatteryLens'
@@ -23,7 +23,8 @@ android {
             resValue 'string', 'app_name', 'BatteryLens 3.4 Preview'
         }
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
@@ -31,6 +32,10 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        resValues true
     }
 }
 

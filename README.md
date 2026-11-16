@@ -1,13 +1,14 @@
 # BatteryLens 3.4
 
-An offline Android battery monitor with transparent capacity estimates, device compatibility diagnostics, and a lightweight native UI. Supports Android 9+; includes a Galaxy S24 FE rated-capacity preset.
+An offline Android battery monitor with transparent capacity estimates, device compatibility diagnostics, and a lightweight native UI. Supports Android 7.0+ (API 24–37, targeting Android 17); includes a Galaxy S24 FE rated-capacity preset.
 
 ## New in 3.4
 
-- Moved seven-day trend readings from an entire rewritten preferences array to a bounded, indexed SQLite database. Existing `live_trends_v1` readings are imported once on a signed update. Storage and trend analysis run on a serial background worker, away from the main UI thread.
-- Split the pure sampling decision (`TrendSamplingPolicy`), trend persistence (`TrendRepository`), and robust charge fitting (`CapacityEstimator`) into focused classes. Session history is parsed only when the persisted version changes; chart and insight calculations run when new readings arrive or their time window expires.
-- Capacity fitting first uses 4%-wide battery-level bins. Even a lengthy charge has at most 26 representatives and 325 pair comparisons. The noisy-endpoint and disagreement checks still apply. App-visible UI refreshes no longer rewrite the calibration checkpoint every five seconds while the background monitor is running.
-- Android 12–17 compatibility is documented in [architecture and API notes](docs/ARCHITECTURE-3.4.md). The APK still supports Android 9+ (`minSdk 28`); feature-specific APIs are guarded by OS version. On Android 12+, a foreground monitor starts from the visible app, not the boot receiver.
+- Moved seven-day trend readings and 60-session calibration history into a WAL-enabled, indexed SQLite database (`battery_trends.db` v2, importing legacy `live_trends_v1` and `calibration_sessions_v2` / `calibrations` once on upgrade). Separated hot runtime counters (`battery_runtime`) from cold settings (`battery_lens`), and consolidated background work onto one serial `AppWorker`.
+- Split the pure sampling decision (`TrendSamplingPolicy`), trend/session persistence (`TrendRepository`), and robust charge fitting (`CapacityEstimator`) into focused classes. Session history is cached in memory and cleared on UI trim/background; chart and insight calculations run only when readings change or their window expires.
+- Resource & memory optimizations for lightweight background tracking and Android 17 memory limits: adaptive monitor polling (60s plugged/active, 5m unplugged screen-on, paused timer unplugged screen-off), `ACTION_BATTERY_CHANGED` debouncing, zero-allocation custom views (`BatteryGaugeView`, `HealthChartView`, `LiveChartView`), lazy tab creation, cached `PendingIntent`s, and notification-text diffing.
+- Android 7.0–17 compatibility (`minSdk 24`, `compileSdk 37`, `targetSdk 37`) documented in [architecture and API notes](docs/ARCHITECTURE-3.4.md): feature-specific APIs are guarded by OS version (`JobScheduler` 24+, notification channels 26+, `computeChargeTimeRemaining` 28+, `WindowInsets` & `ApplicationExitInfo` 30+, `POST_NOTIFICATIONS` 33+, `EXTRA_CYCLE_COUNT` & `specialUse` FGS 34+, edge-to-edge 35+, `EXTRA_CAPACITY_LEVEL` 36+).
+- Automatic monitoring is **enabled by default** and resumes after device restarts (`BOOT_COMPLETED` / `QUICKBOOT_POWERON`) and app updates (`MY_PACKAGE_REPLACED`), backed by a persisted `JobScheduler` watchdog (`MonitorWatchdogJobService`) and a tap-to-resume notification if the OS restricts background startup.
 - The SDK-only 3.4 preview **updates the 3.3 preview** under the same app ID and signing certificate, retaining its sessions and migrating trend history. Its test signing key is not included in source exports. See [validation](docs/VALIDATION-3.4.md).
 
 ## New in 3.3
@@ -55,17 +56,17 @@ See [implementation plan and research](docs/IMPROVEMENT_PLAN.md) and [3.1 valida
 - Optional charge-target, configurable temperature, and low-battery notifications. The app cannot stop charging.
 - Four tabs: Overview, Trends, Sessions, Settings. New live gauge, responsive metric cards, monitoring progress, adaptive lens/lightning icon, and themed-icon support.
 - Export retained sessions as CSV using Android's document picker; clear history with confirmation; copy detailed device diagnostics.
-- Compatible Gradle 8.11.1 wrapper for AGP 8.9.1, executable wrapper, and GitHub Actions build/lint workflow.
+- Gradle 9.8.1 wrapper for AGP 9.4.1 (supporting `compileSdk 37` / Android 17), executable wrapper, and GitHub Actions build/lint workflow.
 
 ## Start monitoring on a Galaxy S24 FE
 
-1. Open BatteryLens and enable **Automatic monitoring**. Allow notifications so status and alerts remain visible.
+1. Open BatteryLens (automatic monitoring is **On** by default) and allow notifications so status and alerts remain visible.
 2. If needed, open **Settings → Open Android app settings**, set battery usage to **Unrestricted**, and remove BatteryLens from Samsung Sleeping/Deep sleeping apps. Labels vary by One UI version.
 3. In Settings, choose Auto-detect or the 80%, 85%, 90%, 95%, or 100% limit configured on your phone. Charge normally across 30+ percentage points below that limit; 20→80% is enough. There is no need to drain to zero or charge to 100%. Hotspot or slow charging can be monitored as long as the battery still gains charge and monitoring remains continuous. The app's separate notification charge target does not change Battery Protection.
 4. Unplug and check **Sessions**. The app uses its last observed connected checkpoint; rejected sessions explain why they were excluded. Judge the trend after at least three long sessions.
-5. After rebooting or force-stopping the app, open it again to resume. Android can still suspend or terminate monitoring; the app does not claim guaranteed collection while stopped.
+5. After rebooting or app updates, `PowerEventReceiver` and the persisted `MonitorWatchdogJobService` resume automatic monitoring automatically (or post a tap-to-resume notification if the OS restricts background startup). Android OEM task killers can still suspend background execution; the app does not claim guaranteed collection if force-stopped.
 
-New installations start with monitoring off. Existing automatic-mode preferences are preserved. The monitor stays enabled while unplugged so it can detect the next charging session; stop it from the switch or notification. No wake lock or exact alarm is used. If Android sleeps long enough to miss checkpoints, incomplete segments may be retained without contributing to health.
+New installations start with **Automatic monitoring enabled by default**. Existing explicit opt-out preferences (`auto_calibration = false`) are preserved. The monitor stays armed with adaptive polling while unplugged (pausing timers when unplugged with screen off) so it detects the next charging session; stop it from the switch or notification. No wake lock or exact alarm is used. If Android sleeps long enough to miss checkpoints, incomplete segments may be retained without contributing to health.
 
 ## Capacity and health
 

@@ -7,6 +7,8 @@ import android.os.BatteryManager;
 import android.os.Build;
 
 final class BatteryReadings {
+    private static final IntentFilter BATTERY_FILTER = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+
     final double soc;
     final int tempTenthC;
     final int voltageMv;
@@ -20,11 +22,14 @@ final class BatteryReadings {
     final long chargeTimeMs;
     final int cycles;
     final String cycleSource;
+    final int chargingStatusExtra;
+    final int capacityLevelExtra;
 
     private BatteryReadings(double soc, int tempTenthC, int voltageMv, int health,
                             int status, int plugged, int chargeUah, int currentNowUa,
                             int currentAvgUa, long energyNwh, long chargeTimeMs,
-                            int cycles, String cycleSource) {
+                            int cycles, String cycleSource,
+                            int chargingStatusExtra, int capacityLevelExtra) {
         this.soc = soc;
         this.tempTenthC = tempTenthC;
         this.voltageMv = voltageMv;
@@ -38,11 +43,19 @@ final class BatteryReadings {
         this.chargeTimeMs = chargeTimeMs;
         this.cycles = cycles;
         this.cycleSource = cycleSource;
+        this.chargingStatusExtra = chargingStatusExtra;
+        this.capacityLevelExtra = capacityLevelExtra;
     }
 
     static BatteryReadings read(Context context) {
+        return read(context, null);
+    }
+
+    static BatteryReadings read(Context context, Intent batteryIntent) {
         BatteryManager bm = (BatteryManager) context.getSystemService(Context.BATTERY_SERVICE);
-        Intent battery = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        Intent battery = batteryIntent != null && Intent.ACTION_BATTERY_CHANGED.equals(batteryIntent.getAction())
+                ? batteryIntent
+                : context.registerReceiver(null, BATTERY_FILTER);
         if (bm == null || battery == null) return null;
 
         int level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
@@ -60,16 +73,25 @@ final class BatteryReadings {
         long energyNwh;
         try { energyNwh = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER); }
         catch (RuntimeException ignored) { energyNwh = Long.MIN_VALUE; }
-        long chargeTimeMs;
-        try {
-            chargeTimeMs = bm.computeChargeTimeRemaining();
-        } catch (Exception ignored) {
-            chargeTimeMs = -1;
+        long chargeTimeMs = -1;
+        if (Build.VERSION.SDK_INT >= 28) {
+            try {
+                chargeTimeMs = bm.computeChargeTimeRemaining();
+            } catch (Exception ignored) {
+                chargeTimeMs = -1;
+            }
         }
 
         int cycles = -1;
+        int chargingStatusExtra = -1;
         if (Build.VERSION.SDK_INT >= 34) {
             cycles = battery.getIntExtra(BatteryManager.EXTRA_CYCLE_COUNT, -1);
+            chargingStatusExtra = battery.getIntExtra(BatteryManager.EXTRA_CHARGING_STATUS, -1);
+        }
+        int capacityLevelExtra = -1;
+        if (Build.VERSION.SDK_INT >= 36) {
+            capacityLevelExtra = battery.getIntExtra(BatteryManager.EXTRA_CAPACITY_LEVEL,
+                    BatteryManager.BATTERY_CAPACITY_LEVEL_UNSUPPORTED);
         }
 
         // No stable public SDK contract for SoH: never infer it from a hidden numeric ID.
@@ -81,7 +103,8 @@ final class BatteryReadings {
             cycleSource = fallback.source;
         }
         return new BatteryReadings(soc, temp, voltage, health, status, plugged,
-                chargeUah, currentNow, currentAvg, energyNwh, chargeTimeMs, cycles, cycleSource);
+                chargeUah, currentNow, currentAvg, energyNwh, chargeTimeMs, cycles, cycleSource,
+                chargingStatusExtra, capacityLevelExtra);
     }
 
     private static int safeInt(BatteryManager manager, int property) {

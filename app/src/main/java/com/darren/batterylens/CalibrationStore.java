@@ -1,29 +1,71 @@
 package com.darren.batterylens;
 
+import android.app.ActivityManager;
+import android.app.ApplicationExitInfo;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.BatteryManager;
+import android.os.Build;
 import android.os.SystemClock;
-import android.provider.Settings;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 final class CalibrationStore {
     static final String PREFS = "battery_lens";
+    static final String RUNTIME_PREFS = "battery_runtime";
     static final String KEY_DESIGN = "design_capacity";
     static final String KEY_AUTO = "auto_calibration";
-    private static final String KEY_SESSIONS = "calibration_sessions_v2";
     private static final String KEY_ACTIVE = "active_calibration_v2";
     private static final String KEY_LAST_NOTE = "last_calibration_note";
     private static final String KEY_LIMIT_HOLD = "charge_limit_hold_v4";
-    private static final String LEGACY_CALIBRATIONS = "calibrations";
-    private static String sessionsCacheRaw;
+    private static final String KEY_RUNTIME_MIGRATED = "runtime_migrated_v1";
+    private static final String KEY_LAST_EXIT = "last_exit_note";
+    private static final String KEY_LAST_EXIT_TS = "last_exit_ts";
+    private static final String KEY_EST_FCC = "cached_est_fcc";
+    private static final String KEY_EST_USED = "cached_est_used";
+    private static final String KEY_EST_CONF = "cached_est_conf";
+    private static final String KEY_EST_MAD = "cached_est_mad";
+
+    interface HistoryCallback {
+        void onHistory(List<Session> sessions, Estimate estimate, long revision);
+    }
+
+    interface ActionCallback {
+        void onDone(boolean changed, String note);
+    }
+
+    private static volatile boolean runtimeLoaded;
+    private static volatile boolean runtimeMigrated;
+    private static volatile boolean activeFlag;
+    private static volatile String activeSourceCache = "";
+    private static volatile double activeStartSocCache = -1;
+    private static volatile double activePeakSocCache = -1;
+    private static volatile boolean activePausedCache;
+    private static volatile long activeStartTimeCache;
+    private static volatile float observedCyclesCache;
+    private static volatile long observedSinceCache;
+    private static volatile String lastNoteCache = "Automatic monitoring is enabled.";
+    private static volatile long sessionsRevision = 1;
+    private static volatile Estimate estimateCache = new Estimate(null, 0, "Low", Double.NaN);
+
+    private static JSONObject activeObjCache;
+    private static boolean limitHoldCache;
+    private static float cyclePrevSoc = -1f;
+    private static boolean cyclePrevPresent;
+    private static long cycleElapsed;
+    private static int cycleBoot = -2;
+    private static boolean cyclePlugged = true;
+
     private static List<Session> sessionsCache;
+    private static long sessionsCacheRevision = -1;
 
     static final class Session {
         long startTime;
@@ -142,17 +184,144 @@ final class CalibrationStore {
         else o.remove(key);
     }
 
-    private static SharedPreferences prefs(Context c) {
-        return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    static SharedPreferences prefs(Context c) {
+        return c.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    }
+
+    static SharedPreferences runtimePrefs(Context c) {
+        Context app = c.getApplicationContext();
+        SharedPreferences rt = app.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE);
+        if (!runtimeMigrated) {
+            SharedPreferences cold = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            if (!cold.getBoolean(KEY_RUNTIME_MIGRATED, false)) {
+                migrateRuntimeKeys(cold, rt);
+            }
+            runtimeMigrated = true;
+        }
+        return rt;
+    }
+
+    private static synchronized void migrateRuntimeKeys(SharedPreferences cold, SharedPreferences rt) {
+        if (cold.getBoolean(KEY_RUNTIME_MIGRATED, false)) return;
+        SharedPreferences.Editor rtEdit = rt.edit();
+        SharedPreferences.Editor coldEdit = cold.edit();
+        String[] strings = {KEY_ACTIVE, KEY_LAST_NOTE, "alert_configuration"};
+        for (String k : strings) {
+            if (cold.contains(k)) { rtEdit.putString(k, cold.getString(k, "")); coldEdit.remove(k); }
+        }
+        String[] bools = {KEY_LIMIT_HOLD, "cycle_plugged", "alert_target_sent", "alert_heat_sent", "alert_low_sent"};
+        for (String k : bools) {
+            if (cold.contains(k)) { rtEdit.putBoolean(k, cold.getBoolean(k, false)); coldEdit.remove(k); }
+        }
+        String[] floats = {"observed_cycles", "cycle_previous_soc"};
+        for (String k : floats) {
+            if (cold.contains(k)) { rtEdit.putFloat(k, cold.getFloat(k, 0f)); coldEdit.remove(k); }
+        }
+        if (cold.contains("cycle_elapsed")) { rtEdit.putLong("cycle_elapsed", cold.getLong("cycle_elapsed", 0)); coldEdit.remove("cycle_elapsed"); }
+        if (cold.contains("cycle_boot")) { rtEdit.putInt("cycle_boot", cold.getInt("cycle_boot", -2)); coldEdit.remove("cycle_boot"); }
+        rtEdit.apply();
+        coldEdit.putBoolean(KEY_RUNTIME_MIGRATED, true).apply();
+    }
+
+    private static void ensureRuntimeLoaded(Context c) {
+        if (runtimeLoaded) return;
+        synchronized (CalibrationStore.class) {
+            if (runtimeLoaded) return;
+            SharedPreferences rt = runtimePrefs(c);
+            String rawActive = rt.getString(KEY_ACTIVE, "");
+            if (rawActive != null && !rawActive.isEmpty()) {
+                try { activeObjCache = new JSONObject(rawActive); } catch (Exception ignored) { activeObjCache = null; }
+            } else {
+                activeObjCache = null;
+            }
+            limitHoldCache = rt.getBoolean(KEY_LIMIT_HOLD, false);
+            observedCyclesCache = rt.getFloat("observed_cycles", 0f);
+            observedSinceCache = prefs(c).getLong("observed_since", 0L);
+            lastNoteCache = rt.getString(KEY_LAST_NOTE, "Automatic monitoring is ready.");
+            cyclePrevPresent = rt.contains("cycle_previous_soc");
+            cyclePrevSoc = rt.getFloat("cycle_previous_soc", -1f);
+            cycleElapsed = rt.getLong("cycle_elapsed", 0L);
+            cycleBoot = rt.getInt("cycle_boot", -2);
+            cyclePlugged = rt.getBoolean("cycle_plugged", true);
+            estimateCache = readEstimateCache(rt);
+            syncVolatileActive();
+            runtimeLoaded = true;
+        }
+    }
+
+    private static Estimate readEstimateCache(SharedPreferences rt) {
+        float fcc = rt.getFloat(KEY_EST_FCC, -1f);
+        int used = rt.getInt(KEY_EST_USED, 0);
+        String conf = rt.getString(KEY_EST_CONF, "Low");
+        float mad = rt.getFloat(KEY_EST_MAD, Float.NaN);
+        Double fccVal = fcc > 0 ? (double) fcc : null;
+        return new Estimate(fccVal, used, conf != null ? conf : "Low", Float.isFinite(mad) ? (double) mad : Double.NaN);
+    }
+
+    private static void saveEstimateCache(Context c, Estimate est) {
+        if (est == null) return;
+        estimateCache = est;
+        SharedPreferences.Editor ed = runtimePrefs(c).edit()
+                .putInt(KEY_EST_USED, est.usedCount)
+                .putString(KEY_EST_CONF, est.confidence != null ? est.confidence : "Low");
+        if (est.fccMah != null && Double.isFinite(est.fccMah)) {
+            ed.putFloat(KEY_EST_FCC, est.fccMah.floatValue());
+        } else {
+            ed.remove(KEY_EST_FCC);
+        }
+        if (Double.isFinite(est.relativeMad)) {
+            ed.putFloat(KEY_EST_MAD, (float) est.relativeMad);
+        } else {
+            ed.remove(KEY_EST_MAD);
+        }
+        ed.apply();
+    }
+
+    /** Fast non-SQLite health estimate cache suitable for home-screen widgets. */
+    static Estimate cachedEstimate(Context c) {
+        ensureRuntimeLoaded(c);
+        return estimateCache;
+    }
+
+    /** Populates the lightweight widget health cache once on AppWorker if never stored yet. */
+    static Estimate ensureEstimateCachedOnWorker(Context c) {
+        ensureRuntimeLoaded(c);
+        if (!runtimePrefs(c).contains(KEY_EST_USED)) {
+            saveEstimateCache(c, estimateFromSessions(loadSessionsOnWorker(c), designCapacity(c)));
+        }
+        return estimateCache;
+    }
+
+    private static void syncVolatileActive() {
+        JSONObject o = activeObjCache;
+        activeFlag = o != null;
+        activeSourceCache = o == null ? "" : o.optString("src", "");
+        activeStartSocCache = o == null ? -1 : o.optDouble("soc", -1);
+        activePeakSocCache = o == null ? -1 : o.optDouble("lastSoc", -1);
+        activePausedCache = o != null && o.optLong("pauseStart", 0) > 0;
+        activeStartTimeCache = o == null ? 0 : o.optLong("time", 0);
     }
 
     static boolean isAutoEnabled(Context c) {
-        return prefs(c).getBoolean(KEY_AUTO, false);
+        return prefs(c).getBoolean(KEY_AUTO, true);
     }
 
     static synchronized void setAutoEnabled(Context c, boolean enabled) {
         prefs(c).edit().putBoolean(KEY_AUTO, enabled).apply();
-        if (!enabled) cancelActiveIfSource(c, "auto");
+    }
+
+    /** Marks automatic mode disabled immediately and finishes any active auto checkpoint on AppWorker. */
+    static void disableAutoAsync(Context c, String endReason) {
+        disableAutoAsync(c, endReason, null);
+    }
+
+    static void disableAutoAsync(Context c, String endReason, Runnable onDone) {
+        Context app = c.getApplicationContext();
+        prefs(app).edit().putBoolean(KEY_AUTO, false).apply();
+        AppWorker.execute(() -> {
+            finishCheckpointBySourceOnWorker(app, "auto", endReason);
+            if (onDone != null) AppWorker.postMain(onDone);
+        });
     }
 
     static float designCapacity(Context c) {
@@ -160,66 +329,76 @@ final class CalibrationStore {
     }
 
     static void setDesignCapacity(Context c, float value) {
-        prefs(c).edit().putFloat(KEY_DESIGN, value).apply();
+        Context app = c.getApplicationContext();
+        prefs(app).edit().putFloat(KEY_DESIGN, value).apply();
+        AppWorker.execute(() -> saveEstimateCache(app, estimateFromSessions(loadSessionsOnWorker(app), value)));
     }
 
-    static void migrateLegacyIfNeeded(Context c) {
-        SharedPreferences p = prefs(c);
-        if (p.contains(KEY_SESSIONS)) return;
-        String legacy = p.getString(LEGACY_CALIBRATIONS, "");
-        JSONArray arr = new JSONArray();
-        if (legacy != null && !legacy.trim().isEmpty()) {
-            String[] parts = legacy.split(",");
-            long now = System.currentTimeMillis();
-            int offset = parts.length;
-            for (String part : parts) {
-                try {
-                    double fcc = Double.parseDouble(part.trim());
-                    if (!Double.isFinite(fcc) || fcc < 500 || fcc > 20000) continue;
-                    Session s = new Session();
-                    s.startTime = now - (long) offset * 86_400_000L;
-                    s.endTime = s.startTime;
-                    s.startSoc = 0;
-                    s.endSoc = 100;
-                    s.startUah = 0;
-                    s.endUah = Math.round(fcc * 1000);
-                    s.startTemp = Double.NaN;
-                    s.endTemp = Double.NaN;
-                    s.fccMah = fcc;
-                    s.source = "legacy";
-                    s.quality = "Imported";
-                    s.used = false;
-                    s.reason = "Imported; collect a monitored session";
-                    arr.put(s.toJson());
-                    offset--;
-                } catch (Exception ignored) {}
-            }
+    static List<Session> parseLegacyString(String legacy) {
+        List<Session> list = new ArrayList<>();
+        if (legacy == null || legacy.trim().isEmpty()) return list;
+        String[] parts = legacy.split(",");
+        long now = System.currentTimeMillis();
+        int offset = parts.length;
+        for (String part : parts) {
+            try {
+                double fcc = Double.parseDouble(part.trim());
+                if (!Double.isFinite(fcc) || fcc < 500 || fcc > 20000) continue;
+                Session s = new Session();
+                s.startTime = now - (long) offset * 86_400_000L;
+                s.endTime = s.startTime;
+                s.startSoc = 0;
+                s.endSoc = 100;
+                s.startUah = 0;
+                s.endUah = Math.round(fcc * 1000);
+                s.startTemp = Double.NaN;
+                s.endTemp = Double.NaN;
+                s.fccMah = fcc;
+                s.source = "legacy";
+                s.quality = "Imported";
+                s.used = false;
+                s.reason = "Imported; collect a monitored session";
+                list.add(s);
+                offset--;
+            } catch (Exception ignored) {}
         }
-        p.edit().putString(KEY_SESSIONS, arr.toString()).apply();
+        return list;
     }
 
     static boolean hasActive(Context c) {
-        return activeObject(c) != null;
+        ensureRuntimeLoaded(c);
+        return activeFlag;
+    }
+
+    /** Fast non-blocking check using in-memory state after initial load. */
+    static boolean hasActiveFast(Context c) {
+        if (!runtimeLoaded) ensureRuntimeLoaded(c);
+        return activeFlag;
     }
 
     static String activeSource(Context c) {
-        JSONObject o = activeObject(c);
-        return o == null ? "" : o.optString("src", "");
+        ensureRuntimeLoaded(c);
+        return activeSourceCache;
     }
 
     static double activeStartSoc(Context c) {
-        JSONObject o = activeObject(c);
-        return o == null ? -1 : o.optDouble("soc", -1);
+        ensureRuntimeLoaded(c);
+        return activeStartSocCache;
     }
 
     static double activePeakSoc(Context c) {
-        JSONObject o = activeObject(c);
-        return o == null ? -1 : o.optDouble("lastSoc", -1);
+        ensureRuntimeLoaded(c);
+        return activePeakSocCache;
     }
 
     static boolean activePaused(Context c) {
-        JSONObject o = activeObject(c);
-        return o != null && o.optLong("pauseStart", 0) > 0;
+        ensureRuntimeLoaded(c);
+        return activePausedCache;
+    }
+
+    static long activeStartTime(Context c) {
+        ensureRuntimeLoaded(c);
+        return activeStartTimeCache;
     }
 
     static int chosenChargeLimit(Context c) {
@@ -237,25 +416,104 @@ final class CalibrationStore {
                 : MeasurementRules.pausedLimit(learnedChargeLimit(c), peakSoc, stopped);
     }
 
-    static long activeStartTime(Context c) {
-        JSONObject o = activeObject(c);
-        return o == null ? 0 : o.optLong("time", 0);
+    static long sessionsRevision() { return sessionsRevision; }
+
+    static void trimMemory() {
+        sessionsCache = null;
+        sessionsCacheRevision = -1;
+    }
+
+    static void requestHistoryAsync(Context c, HistoryCallback callback) {
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> {
+            List<Session> list = loadSessionsOnWorker(app);
+            Estimate est = estimateFromSessions(list, designCapacity(app));
+            saveEstimateCache(app, est);
+            long rev = sessionsRevision;
+            AppWorker.postMain(() -> callback.onHistory(list, est, rev));
+        });
+    }
+
+    private static List<Session> loadSessionsOnWorker(Context app) {
+        long rev = sessionsRevision;
+        if (sessionsCache != null && sessionsCacheRevision == rev) {
+            return sessionsCache;
+        }
+        List<Session> loaded;
+        try {
+            loaded = Collections.unmodifiableList(TrendStore.repository(app).loadSessions());
+        } catch (RuntimeException ignored) {
+            loaded = Collections.emptyList();
+        }
+        sessionsCache = loaded;
+        sessionsCacheRevision = rev;
+        return loaded;
+    }
+
+    static void startSessionAsync(Context c, String source, ActionCallback callback) {
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> {
+            BatteryReadings r = BatteryReadings.read(app);
+            boolean started = startSession(app, source, r);
+            String note = lastNote(app);
+            if (callback != null) AppWorker.postMain(() -> callback.onDone(started, note));
+        });
+    }
+
+    static void finishSessionAsync(Context c, ActionCallback callback) {
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> {
+            Session finished = finishSessionOnWorker(app);
+            String note = lastNote(app);
+            if (callback != null) AppWorker.postMain(() -> callback.onDone(finished != null, note));
+        });
+    }
+
+    static void finishCheckpointAsync(Context c, String endReason) {
+        finishCheckpointAsync(c, endReason, null);
+    }
+
+    static void finishCheckpointAsync(Context c, String endReason, Runnable onDone) {
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> {
+            finishCheckpointOnWorker(app, endReason);
+            if (onDone != null) AppWorker.postMain(onDone);
+        });
+    }
+
+    static void clearHistoryAsync(Context c, ActionCallback callback) {
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> {
+            clearHistoryOnWorker(app);
+            String note = lastNote(app);
+            if (callback != null) AppWorker.postMain(() -> callback.onDone(true, note));
+        });
+    }
+
+    static void reconcileAutoAsync(Context c) {
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> observeOnWorker(app, BatteryReadings.read(app)));
+    }
+
+    static void onBootAsync(Context c) {
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> onBootOnWorker(app));
     }
 
     static synchronized boolean startSession(Context c, String source) {
         return startSession(c, source, BatteryReadings.read(c));
     }
 
-    private static boolean startSession(Context c, String source, BatteryReadings r) {
-        if (hasActive(c)) return false;
+    private static synchronized boolean startSession(Context c, String source, BatteryReadings r) {
+        ensureRuntimeLoaded(c);
+        if (activeObjCache != null) return false;
         if (r == null || !r.hasUsableCounter() || !MeasurementRules.validSoc(r.soc) || !r.isPlugged()) {
             setLastNote(c, "Waiting for a charger and a usable charge counter. Check compatibility if this persists.");
             return false;
         }
         boolean stopped = r.status == BatteryManager.BATTERY_STATUS_NOT_CHARGING
                 || r.status == BatteryManager.BATTERY_STATUS_FULL;
-        if (prefs(c).getBoolean(KEY_LIMIT_HOLD, false)
-                || observedChargeLimit(c, r.soc, stopped) >= 0) {
+        if (limitHoldCache || observedChargeLimit(c, r.soc, stopped) >= 0) {
             setLastNote(c, "Charging is paused near its limit. Unplug before starting another session.");
             return false;
         }
@@ -279,32 +537,47 @@ final class CalibrationStore {
         return true;
     }
 
-    /** Called from the monitor and visible Activity, with the same continuity rules. */
-    static synchronized void observe(Context c, BatteryReadings r) {
+    /** Executes checkpoint & cycle accounting on AppWorker (off the main thread). */
+    static synchronized void observeOnWorker(Context c, BatteryReadings r) {
         if (r == null || !MeasurementRules.validSoc(r.soc)) return;
+        ensureRuntimeLoaded(c);
         recordObservedCycles(c, r);
-        if (!r.isPlugged()) prefs(c).edit().remove(KEY_LIMIT_HOLD).apply();
-        JSONObject o = activeObject(c);
+        if (!r.isPlugged() && limitHoldCache) {
+            limitHoldCache = false;
+            runtimePrefs(c).edit().remove(KEY_LIMIT_HOLD).apply();
+        }
+        JSONObject o = activeObjCache;
+        boolean finishedNow = false;
         if (o != null) {
             long now = SystemClock.elapsedRealtime();
+            int currentBoot = TrendStore.bootCount(c);
+            int savedBoot = o.optInt("boot", -1);
+            boolean rebooted = savedBoot >= 0 && currentBoot >= 0 && savedBoot != currentBoot;
             boolean continuous = o.has("lastElapsed") && MeasurementRules.continuous(
-                    o.optLong("lastElapsed"), now, o.optInt("boot", -1), boot(c));
+                    o.optLong("lastElapsed"), now, savedBoot, currentBoot);
             if (!continuous || o.optLong("progressElapsed", now) - o.optLong("startElapsed", now)
                     > MeasurementRules.MAX_SESSION_MS) {
-                // Preserve only the last known charging segment, never a later discharge reading.
-                finishCheckpoint(c, "Monitoring interrupted; saved last observed segment");
+                finishCheckpointOnWorker(c, rebooted
+                        ? "Phone restarted; saved last observed segment"
+                        : "Monitoring interrupted; saved last observed segment");
+                finishedNow = true;
             } else if (!r.isPlugged()) {
-                // Last connected checkpoint avoids the unplug/battery-broadcast ordering race.
-                finishCheckpoint(c, "Charger disconnected");
+                finishCheckpointOnWorker(c, "Charger disconnected");
+                finishedNow = true;
             } else if (!r.hasUsableCounter()) {
-                finishCheckpoint(c, "Charge counter became unavailable");
+                finishCheckpointOnWorker(c, "Charge counter became unavailable");
+                finishedNow = true;
             } else {
                 checkpoint(c, o, r);
-                if (o.optBoolean("limitPaused"))
-                    finishCheckpoint(c, "Charging paused at protection limit");
+                if (o.optBoolean("limitPaused")) {
+                    finishCheckpointOnWorker(c, "Charging paused at protection limit");
+                    finishedNow = true;
+                }
             }
         }
-        if (r.isPlugged() && !hasActive(c) && isAutoEnabled(c)) startSession(c, "auto", r);
+        if (r.isPlugged() && activeObjCache == null && !finishedNow && isAutoEnabled(c)) {
+            startSession(c, "auto", r);
+        }
     }
 
     private static void checkpoint(Context c, JSONObject o, BatteryReadings r) {
@@ -314,7 +587,6 @@ final class CalibrationStore {
             boolean first = !o.has("lastElapsed");
             boolean progress = first || MeasurementRules.forwardProgress(
                     o.optDouble("lastSoc", -1), o.optLong("lastUah", 0), r.soc, r.chargeUah);
-            // Count independent observations, not duplicate sticky broadcasts/UI refreshes.
             if (first || elapsed - o.optLong("countedElapsed", 0) >= 30_000 || progress) {
                 o.put("samples", o.optInt("samples") + 1);
                 o.put("countedElapsed", elapsed);
@@ -332,7 +604,7 @@ final class CalibrationStore {
                 o.put("endMv", r.voltageMv);
                 putFinite(o, "lastTemp", r.temperatureC());
                 JSONArray steps = o.optJSONArray("steps");
-                if (steps == null) steps = new JSONArray(); // Pre-upgrade active session is history only.
+                if (steps == null) steps = new JSONArray();
                 JSONArray last = steps.optJSONArray(steps.length() - 1);
                 if (last == null || r.soc >= last.optDouble(0, -1) + CapacityEstimator.BIN_WIDTH) {
                     steps.put(new JSONArray().put(r.soc).put(r.chargeUah));
@@ -343,6 +615,8 @@ final class CalibrationStore {
                     o.put("minTemp", Math.min(o.optDouble("minTemp", t), t));
                     o.put("maxTemp", Math.max(o.optDouble("maxTemp", t), t));
                 } else o.put("missingTemp", true);
+                o.remove("unknownStopStart");
+                o.remove("unknownStopCandidate");
             } else if (!first) {
                 double previous = o.optDouble("observedSoc", r.soc);
                 boolean stopped = r.status == BatteryManager.BATTERY_STATUS_NOT_CHARGING
@@ -367,28 +641,35 @@ final class CalibrationStore {
                     o.remove("unknownStopCandidate");
                 }
             }
-            if (progress) {
-                o.remove("unknownStopStart");
-                o.remove("unknownStopCandidate");
-            }
             o.put("observedSoc", r.soc);
             o.put("lastElapsed", elapsed);
-            o.put("boot", boot(c));
+            o.put("boot", TrendStore.bootCount(c));
             if (o.has("pauseStart") && elapsed - o.optLong("pauseStart") >= 10 * 60_000L)
                 o.put("limitPaused", true);
-            prefs(c).edit().putString(KEY_ACTIVE, o.toString()).apply();
+            activeObjCache = o;
+            syncVolatileActive();
+            runtimePrefs(c).edit().putString(KEY_ACTIVE, o.toString()).apply();
         } catch (Exception ignored) { setLastNote(c, "Could not save this battery observation."); }
     }
 
-    static synchronized Session finishSession(Context c) {
-        long originalStart = activeStartTime(c);
+    private static synchronized Session finishSessionOnWorker(Context c) {
+        ensureRuntimeLoaded(c);
+        long originalStart = activeStartTimeCache;
         BatteryReadings r = BatteryReadings.read(c);
-        if (r != null) observe(c, r);
-        return hasActive(c) && activeStartTime(c) == originalStart ? finishCheckpoint(c, "Finished by you") : null;
+        if (r != null) observeOnWorker(c, r);
+        return activeObjCache != null && activeStartTimeCache == originalStart
+                ? finishCheckpointOnWorker(c, "Finished by you") : null;
     }
 
-    static synchronized Session finishCheckpoint(Context c, String endReason) {
-        JSONObject active = activeObject(c);
+    static synchronized Session finishCheckpointBySourceOnWorker(Context c, String source, String endReason) {
+        ensureRuntimeLoaded(c);
+        if (activeObjCache == null || !source.equals(activeSourceCache)) return null;
+        return finishCheckpointOnWorker(c, endReason);
+    }
+
+    static synchronized Session finishCheckpointOnWorker(Context c, String endReason) {
+        ensureRuntimeLoaded(c);
+        JSONObject active = activeObjCache;
         if (active == null) return null;
         Session s = new Session();
         s.startTime = active.optLong("time", 0);
@@ -424,8 +705,6 @@ final class CalibrationStore {
         s.plugType = active.optInt("plug", 0);
         s.startVoltageMv = active.optInt("startMv", 0);
         s.endVoltageMv = active.optInt("endMv", 0);
-        // Persist duration independently of user wall-clock changes.
-        s.endTime = active.optLong("lastTime", s.startTime);
         String rejection = s.deltaSoc() < 30 ? "Less than 30% gained"
                 : MeasurementRules.fitRejection(fit, s.reversals);
         if (rejection.isEmpty()) rejection = MeasurementRules.rejection(s.fccMah, s.deltaSoc(), duration,
@@ -446,96 +725,161 @@ final class CalibrationStore {
                     .putInt("custom_stop_count", count)
                     .putInt("learned_charge_limit", count >= 2 ? candidate : learnedChargeLimit(c)).apply();
         }
-        // Even rejected sessions remain inspectable. Persist history and clear the active session
-        // in ONE edit, so a process death cannot append the same session twice.
-        List<Session> all = new ArrayList<>(sessions(c));
-        all.add(s);
-        while (all.size() > 60) all.remove(0);
-        JSONArray arr = new JSONArray();
-        for (Session item : all) arr.put(item.toJson());
-        SharedPreferences.Editor edit = prefs(c).edit().putString(KEY_SESSIONS, arr.toString()).remove(KEY_ACTIVE);
-        if (active.optBoolean("limitPaused") && !"Charger disconnected".equals(endReason)) edit.putBoolean(KEY_LIMIT_HOLD, true);
-        edit.putString(KEY_LAST_NOTE, s.used ? "Saved a " + Math.round(s.deltaSoc()) + "% segment for estimation. " + endReason
-                        : "Session saved as history: " + s.reason).apply();
+        TrendStore.repository(c).appendSession(s);
+        activeObjCache = null;
+        syncVolatileActive();
+        sessionsCache = null;
+        sessionsRevision++;
+        String note = s.used ? "Saved a " + Math.round(s.deltaSoc()) + "% segment for estimation. " + endReason
+                : "Session saved as history: " + s.reason;
+        lastNoteCache = note;
+        SharedPreferences.Editor edit = runtimePrefs(c).edit().remove(KEY_ACTIVE).putString(KEY_LAST_NOTE, note);
+        if (active.optBoolean("limitPaused") && !"Charger disconnected".equals(endReason)) {
+            limitHoldCache = true;
+            edit.putBoolean(KEY_LIMIT_HOLD, true);
+        }
+        edit.apply();
+        if (s.used) {
+            saveEstimateCache(c, estimateFromSessions(loadSessionsOnWorker(c), designCapacity(c)));
+        }
         return s;
     }
 
-    static synchronized void reconcileAutoState(Context c) { observe(c, BatteryReadings.read(c)); }
-
-    static synchronized void onBoot(Context c) {
-        finishCheckpoint(c, "Phone restarted; saved last observed segment");
-        prefs(c).edit().remove("cycle_previous_soc").apply();
-        setLastNote(c, "Phone restarted. Open BatteryLens to resume monitoring.");
-    }
-
-    private static int boot(Context c) {
-        return Settings.Global.getInt(c.getContentResolver(), Settings.Global.BOOT_COUNT, -1);
+    private static synchronized void onBootOnWorker(Context c) {
+        ensureRuntimeLoaded(c);
+        finishCheckpointOnWorker(c, "Phone restarted; saved last observed segment");
+        cyclePrevPresent = false;
+        cyclePrevSoc = -1f;
+        runtimePrefs(c).edit().remove("cycle_previous_soc").apply();
+        setLastNote(c, isAutoEnabled(c)
+                ? "Phone restarted. Monitoring resumed automatically."
+                : "Phone restarted. Enable monitoring to resume.");
     }
 
     private static void recordObservedCycles(Context c, BatteryReadings r) {
-        SharedPreferences p = prefs(c);
         long elapsed = SystemClock.elapsedRealtime();
-        boolean continuous = p.contains("cycle_previous_soc") && MeasurementRules.continuous(
-                p.getLong("cycle_elapsed", 0), elapsed, p.getInt("cycle_boot", -2), boot(c));
-        double delta = MeasurementRules.observedDischarge(p.getFloat("cycle_previous_soc", -1), r.soc,
-                p.getBoolean("cycle_plugged", true), r.isPlugged(), continuous);
-        SharedPreferences.Editor edit = p.edit().putFloat("observed_cycles", p.getFloat("observed_cycles", 0) + (float) delta)
-                .putFloat("cycle_previous_soc", (float) r.soc).putLong("cycle_elapsed", elapsed)
-                .putInt("cycle_boot", boot(c)).putBoolean("cycle_plugged", r.isPlugged());
-        if (!p.contains("observed_since")) edit.putLong("observed_since", System.currentTimeMillis());
+        int boot = TrendStore.bootCount(c);
+        boolean continuous = cyclePrevPresent && MeasurementRules.continuous(
+                cycleElapsed, elapsed, cycleBoot, boot);
+        double delta = MeasurementRules.observedDischarge(cyclePrevPresent ? cyclePrevSoc : -1f, r.soc,
+                cyclePlugged, r.isPlugged(), continuous);
+        float newSoc = (float) r.soc;
+        boolean plugged = r.isPlugged();
+        boolean shouldPersist = !continuous
+                || delta > 0
+                || !cyclePrevPresent
+                || Math.abs(newSoc - cyclePrevSoc) >= 0.1f
+                || plugged != cyclePlugged
+                || elapsed - cycleElapsed >= 55_000L;
+        if (!shouldPersist) return;
+
+        observedCyclesCache = observedCyclesCache + (float) delta;
+        cyclePrevPresent = true;
+        cyclePrevSoc = newSoc;
+        cycleElapsed = elapsed;
+        cycleBoot = boot;
+        cyclePlugged = plugged;
+
+        SharedPreferences.Editor edit = runtimePrefs(c).edit()
+                .putFloat("observed_cycles", observedCyclesCache)
+                .putFloat("cycle_previous_soc", newSoc)
+                .putLong("cycle_elapsed", elapsed)
+                .putInt("cycle_boot", boot)
+                .putBoolean("cycle_plugged", plugged);
+        if (observedSinceCache <= 0) {
+            long since = System.currentTimeMillis();
+            observedSinceCache = since;
+            prefs(c).edit().putLong("observed_since", since).apply();
+        }
         edit.apply();
     }
 
     static synchronized void breakCycleContinuity(Context c) {
-        prefs(c).edit().remove("cycle_previous_soc").apply();
+        ensureRuntimeLoaded(c);
+        if (!cyclePrevPresent) return;
+        cyclePrevPresent = false;
+        cyclePrevSoc = -1f;
+        runtimePrefs(c).edit().remove("cycle_previous_soc").apply();
     }
 
-    static float observedCycles(Context c) { return prefs(c).getFloat("observed_cycles", 0); }
-    static long observedSince(Context c) { return prefs(c).getLong("observed_since", 0); }
-
-    static synchronized void cancelActiveIfSource(Context c, String source) {
-        if (hasActive(c) && source.equals(activeSource(c))) {
-            clearActive(c);
-            setLastNote(c, "Active automatic session cancelled.");
-        }
+    static float observedCycles(Context c) {
+        ensureRuntimeLoaded(c);
+        return observedCyclesCache;
     }
 
-    static synchronized void clearHistory(Context c) {
-        prefs(c).edit().remove(KEY_SESSIONS).remove(LEGACY_CALIBRATIONS).remove(KEY_ACTIVE).apply();
-        sessionsCacheRaw = null;
+    static long observedSince(Context c) {
+        ensureRuntimeLoaded(c);
+        return observedSinceCache;
+    }
+
+    private static synchronized void clearHistoryOnWorker(Context c) {
+        ensureRuntimeLoaded(c);
+        TrendStore.repository(c).clearSessions();
+        activeObjCache = null;
+        syncVolatileActive();
         sessionsCache = null;
-        setLastNote(c, "Calibration history cleared.");
+        sessionsRevision++;
+        lastNoteCache = "Calibration history cleared.";
+        runtimePrefs(c).edit().remove(KEY_ACTIVE).putString(KEY_LAST_NOTE, lastNoteCache).apply();
+        saveEstimateCache(c, new Estimate(null, 0, "Low", Double.NaN));
     }
 
     static String lastNote(Context c) {
-        return prefs(c).getString(KEY_LAST_NOTE, "Automatic calibration is ready.");
+        ensureRuntimeLoaded(c);
+        return lastNoteCache;
     }
 
-    static synchronized List<Session> sessions(Context c) {
-        migrateLegacyIfNeeded(c);
-        String raw = prefs(c).getString(KEY_SESSIONS, "[]");
-        if (raw != null && raw.equals(sessionsCacheRaw) && sessionsCache != null) return sessionsCache;
-        List<Session> out = new ArrayList<>();
+    static void recordProcessExitInfo(Context c) {
+        if (Build.VERSION.SDK_INT < 30) return;
+        Context app = c.getApplicationContext();
+        AppWorker.execute(() -> recordExitInfoApi30(app));
+    }
+
+    @android.annotation.TargetApi(30)
+    private static void recordExitInfoApi30(Context app) {
         try {
-            JSONArray a = new JSONArray(raw == null ? "[]" : raw);
-            for (int i = 0; i < a.length(); i++) {
-                Session s = Session.fromJson(a.optJSONObject(i));
-                if (s != null) out.add(s);
-            }
-        } catch (Exception ignored) {}
-        sessionsCacheRaw = raw;
-        sessionsCache = Collections.unmodifiableList(out);
-        return sessionsCache;
+            ActivityManager am = (ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return;
+            List<ApplicationExitInfo> reasons = am.getHistoricalProcessExitReasons(app.getPackageName(), 0, 1);
+            if (reasons == null || reasons.isEmpty()) return;
+            ApplicationExitInfo info = reasons.get(0);
+            long ts = info.getTimestamp();
+            SharedPreferences rt = runtimePrefs(app);
+            if (ts <= rt.getLong(KEY_LAST_EXIT_TS, 0)) return;
+            String desc = exitReasonLabel(info.getReason()) + " @ "
+                    + new SimpleDateFormat("MMM d HH:mm", Locale.US).format(new Date(ts));
+            String detail = info.getDescription();
+            if (detail != null && !detail.trim().isEmpty()) desc += " (" + detail.trim() + ")";
+            rt.edit().putLong(KEY_LAST_EXIT_TS, ts).putString(KEY_LAST_EXIT, desc).apply();
+        } catch (Exception ignored) { }
     }
 
-    static Estimate estimate(Context c) {
+    static String lastProcessExitNote(Context c) {
+        return runtimePrefs(c).getString(KEY_LAST_EXIT, "");
+    }
+
+    @android.annotation.TargetApi(30)
+    private static String exitReasonLabel(int reason) {
+        switch (reason) {
+            case ApplicationExitInfo.REASON_LOW_MEMORY: return "Low memory kill";
+            case ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE: return "Excessive resource usage";
+            case ApplicationExitInfo.REASON_USER_REQUESTED: return "Stopped by user";
+            case ApplicationExitInfo.REASON_USER_STOPPED: return "Force-stopped";
+            case ApplicationExitInfo.REASON_CRASH: return "App crash";
+            case ApplicationExitInfo.REASON_ANR: return "ANR";
+            case ApplicationExitInfo.REASON_OTHER: return "System killed";
+            default: return "Code " + reason;
+        }
+    }
+
+    static Estimate estimateFromSessions(List<Session> all, float design) {
         List<Double> vals = new ArrayList<>();
-        List<Session> all = sessions(c);
-        float design = designCapacity(c);
-        for (int i = all.size() - 1; i >= 0 && vals.size() < 16; i--) {
-            Session s = all.get(i);
-            if (s.used && s.fccMah >= 500 && s.fccMah <= 20000
-                    && (design <= 0 || (s.fccMah >= design * 0.45 && s.fccMah <= design * 1.35))) vals.add(s.fccMah);
+        if (all != null) {
+            for (int i = all.size() - 1; i >= 0 && vals.size() < 16; i--) {
+                Session s = all.get(i);
+                if (s.used && s.fccMah >= 500 && s.fccMah <= 20000
+                        && (design <= 0 || (s.fccMah >= design * 0.45 && s.fccMah <= design * 1.35))) vals.add(s.fccMah);
+            }
         }
         if (vals.isEmpty()) return new Estimate(null, 0, "Low", Double.NaN);
 
@@ -568,18 +912,9 @@ final class CalibrationStore {
         return new Estimate(finalMedian, n, confidence, relMad);
     }
 
-    private static JSONObject activeObject(Context c) {
-        String raw = prefs(c).getString(KEY_ACTIVE, "");
-        if (raw == null || raw.isEmpty()) return null;
-        try { return new JSONObject(raw); } catch (Exception ignored) { return null; }
-    }
-
-    private static void clearActive(Context c) {
-        prefs(c).edit().remove(KEY_ACTIVE).apply();
-    }
-
     private static void setLastNote(Context c, String note) {
-        prefs(c).edit().putString(KEY_LAST_NOTE, note).apply();
+        lastNoteCache = note;
+        runtimePrefs(c).edit().putString(KEY_LAST_NOTE, note).apply();
     }
 
     private static String qualityFor(double start, double end, double delta) {

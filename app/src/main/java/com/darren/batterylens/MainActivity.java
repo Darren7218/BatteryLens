@@ -1,42 +1,59 @@
 package com.darren.batterylens;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.Manifest;
+import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.pm.PackageManager;
-import android.net.Uri;
-import android.os.Handler;
-import android.os.Looper;
-import android.provider.Settings;
-import android.widget.ImageView;
-import android.widget.ProgressBar;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
+import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.graphics.drawable.ClipDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.TouchDelegate;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -44,83 +61,101 @@ import java.util.List;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
+    private static final String KEY_NOTIF_PROMPTED = "notif_prompted_v1";
+
     private final DecimalFormat one = new DecimalFormat("0.0");
     private final DecimalFormat zero = new DecimalFormat("0");
     private final SimpleDateFormat shortDate = new SimpleDateFormat("MMM d, HH:mm", Locale.getDefault());
+    private final Date tempDate = new Date();
 
-    private TextView healthValue;
-    private TextView healthSource;
-    private TextView confidenceValue;
-    private TextView capacityValue;
-    private TextView baselineSummary;
-    private TextView autoStatus;
-    private TextView autoChip;
-    private TextView powerValue;
-    private TextView chargeInfo, runtimeValue, screenDrainValue, idleDrainValue, dailyStress;
-    private TextView tempValue;
-    private TextView cyclesValue;
-    private TextView timeValue;
+    private TextView healthValue, healthSource, confidenceValue, capacityValue, baselineSummary;
+    private TextView autoStatus, autoChip, powerValue, chargeInfo, runtimeValue;
+    private TextView screenDrainValue, idleDrainValue, dailyStress, tempValue, cyclesValue, timeValue;
     private TextView historyValue, sessionSummary, trendSummary, currentValue, voltageValue;
+    private TextView chargeStatus, cycleExplanation, observedValue, monitorHelp, rawValue;
     private LinearLayout sessionList;
     private LiveChartView liveChart;
+    private HealthChartView chart;
+    private BatteryGaugeView gauge;
+    private ProgressBar progress;
+    private EditText designCapacityInput;
+    private Button manualButton, notificationsButton;
+    private Switch autoSwitch;
+
     private int sessionFilter, trendMetric, trendHours = 6, healthWindowDays;
+    private List<CalibrationStore.Session> cachedSessions;
+    private CalibrationStore.Estimate cachedEstimate;
+    private long lastHistoryRevision = -1L;
+    private float lastHistoryDesign = Float.NaN;
+    private boolean historyLoading;
+
     private List<CalibrationStore.Session> historySnapshot;
     private int historyFilter = -1;
     private float historyDesign = Float.NaN;
+
     private long lastTrendRevision = Long.MIN_VALUE, lastTrendRefresh;
     private int lastTrendHours = -1, lastTrendMetric = -1;
+    private boolean trendsLoading;
+
     private long lastInsightRevision = Long.MIN_VALUE, lastInsightRefresh;
     private InsightAnalysis cachedInsights;
     private boolean insightsLoading;
-    private TextView rawValue;
-    private EditText designCapacityInput;
-    private Button manualButton;
-    private Switch autoSwitch;
-    private HealthChartView chart;
+    private double latestInsightSoc = -1;
+    private boolean latestInsightPlugged;
 
     private final int bg = Color.rgb(9, 20, 26);
-    private final int surface = Color.rgb(13, 28, 35);
-    private final int card = Color.rgb(19, 36, 44);
-    private final int cardElevated = Color.rgb(23, 45, 53);
-    private final int stroke = Color.rgb(43, 65, 73);
+    private final int surface = Color.rgb(13, 27, 34);
+    private final int card = Color.rgb(18, 35, 43);
+    private final int cardElevated = Color.rgb(22, 44, 54);
+    private final int stroke = Color.rgb(38, 61, 70);
+    private final int heroStroke = Color.rgb(52, 92, 102);
     private final int primary = Color.rgb(244, 247, 252);
-    private final int secondary = Color.rgb(171, 191, 198);
+    private final int secondary = Color.rgb(167, 189, 197);
     private final int accent = Color.rgb(109, 235, 209);
-    private final int accentStrong = Color.rgb(32, 175, 112);
     private final int accentBlue = Color.rgb(103, 192, 255);
     private final int warning = Color.rgb(255, 196, 92);
     private final int danger = Color.rgb(255, 137, 112);
+    private static final Typeface SANS_REGULAR = Typeface.create("sans-serif", Typeface.NORMAL);
+    private static final Typeface SANS_BOLD = Typeface.create("sans-serif", Typeface.BOLD);
 
-    private BatteryGaugeView gauge;
-    private TextView chargeStatus, cycleExplanation, observedValue, monitorHelp;
-    private ProgressBar progress;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean receiverRegistered;
     private boolean visible;
     private boolean updatingSwitch;
+    private boolean awaitingDocumentPicker;
     private long lastUiObservation;
     private int selectedPage;
+    private int lastChipState;
     private String pendingCsv;
     private final LinearLayout[] pages = new LinearLayout[4];
+    private final boolean[] built = new boolean[4];
     private final Button[] tabs = new Button[4];
+    private FrameLayout headerWrap, navWrap;
     private ScrollView contentScroll;
+    private BatteryReadings lastReadings;
+
+    private final Runnable monitorUiListener = () -> {
+        if (!isGone() && visible) refreshBattery();
+    };
+
     private final BroadcastReceiver batteryReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent intent) {
-            CalibrationStore.reconcileAutoState(c);
-            refreshBattery();
+            if (!BatteryMonitorService.running) {
+                CalibrationStore.reconcileAutoAsync(c);
+            }
+            refreshBattery(intent);
         }
     };
+
     private final Runnable liveRefresh = new Runnable() {
         @Override public void run() {
             if (!visible) return;
-            // The service owns minute-by-minute checkpoints while active. Keep the UI live
-            // without writing session preferences on every five-second repaint.
-            long now = android.os.SystemClock.elapsedRealtime();
+            long now = SystemClock.elapsedRealtime();
             if (!BatteryMonitorService.running && now - lastUiObservation >= 60_000) {
-                CalibrationStore.reconcileAutoState(MainActivity.this);
+                CalibrationStore.reconcileAutoAsync(MainActivity.this);
                 lastUiObservation = now;
             }
-            refreshBattery();
+            refreshBattery(null);
             handler.postDelayed(this, 5_000);
         }
     };
@@ -128,15 +163,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
-        else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-        getWindow().setStatusBarColor(Color.TRANSPARENT);
-        getWindow().setNavigationBarColor(Color.TRANSPARENT);
-        getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        if (!BatteryMonitorService.running) CalibrationStore.breakCycleContinuity(this);
+        if (!BatteryMonitorService.running && !CalibrationStore.isAutoEnabled(this)) {
+            AppWorker.execute(() -> CalibrationStore.breakCycleContinuity(getApplicationContext()));
+        }
         seedDesignCapacityIfNeeded();
-        CalibrationStore.migrateLegacyIfNeeded(this);
         if (savedInstanceState != null) {
             selectedPage = savedInstanceState.getInt("page", 0);
             pendingCsv = savedInstanceState.getString("csv");
@@ -146,14 +176,67 @@ public class MainActivity extends Activity {
             healthWindowDays = savedInstanceState.getInt("healthWindow", 0);
         }
         buildUi();
-        CalibrationStore.reconcileAutoState(this);
+        configureSystemBars();
+        CalibrationStore.reconcileAutoAsync(this);
+        CalibrationStore.recordProcessExitInfo(this);
         refreshBattery();
+    }
+
+    private void configureSystemBars() {
+        Window window = getWindow();
+        if (window == null) return;
+        View decor = window.getDecorView();
+        if (Build.VERSION.SDK_INT >= 35) {
+            window.setNavigationBarContrastEnforced(false);
+            clearLightSystemBarFlags(decor, window);
+        } else if (Build.VERSION.SDK_INT >= 30) {
+            configureSystemBarsApi30(window, decor);
+        } else {
+            configureSystemBarsLegacy(window, decor);
+        }
+    }
+
+    @android.annotation.TargetApi(30)
+    private void clearLightSystemBarFlags(View decor, Window window) {
+        WindowInsetsController controller = decor != null ? decor.getWindowInsetsController() : window.getInsetsController();
+        if (controller != null) {
+            controller.setSystemBarsAppearance(0,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+        }
+    }
+
+    @android.annotation.TargetApi(30)
+    @SuppressWarnings("deprecation")
+    private void configureSystemBarsApi30(Window window, View decor) {
+        window.setDecorFitsSystemWindows(false);
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        clearLightSystemBarFlags(decor, window);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void configureSystemBarsLegacy(Window window, View decor) {
+        decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
     }
 
     @Override protected void onResume() {
         super.onResume();
         visible = true;
-        if (CalibrationStore.isAutoEnabled(this) || CalibrationStore.hasActive(this)) BatteryMonitorService.start(this);
+        awaitingDocumentPicker = false;
+        BatteryMonitorService.setUiStateListener(monitorUiListener);
+        if (CalibrationStore.isAutoEnabled(this) || CalibrationStore.hasActive(this)) {
+            requestNotificationsOnce();
+            if (!BatteryMonitorService.running && !BatteryMonitorService.starting) {
+                BatteryMonitorService.start(this);
+            }
+            MonitorWatchdogJobService.schedule(this);
+        }
         IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(batteryReceiver, filter);
@@ -163,13 +246,45 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         visible = false;
+        BatteryMonitorService.setUiStateListener(null);
         handler.removeCallbacks(liveRefresh);
-        if (receiverRegistered) { unregisterReceiver(batteryReceiver); receiverRegistered = false; }
-        if (!BatteryMonitorService.running && !BatteryMonitorService.starting) {
-            CalibrationStore.finishCheckpoint(this, "App left foreground without background monitoring");
-            CalibrationStore.breakCycleContinuity(this);
+        if (receiverRegistered) {
+            unregisterReceiver(batteryReceiver);
+            receiverRegistered = false;
         }
         super.onPause();
+    }
+
+    @Override protected void onStop() {
+        if (!isChangingConfigurations() && !awaitingDocumentPicker
+                && !BatteryMonitorService.running && !BatteryMonitorService.starting) {
+            CalibrationStore.finishCheckpointAsync(this, "App left foreground without background monitoring");
+            AppWorker.execute(() -> CalibrationStore.breakCycleContinuity(getApplicationContext()));
+        }
+        releaseHeavyUiCaches();
+        super.onStop();
+    }
+
+    @Override public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= TRIM_MEMORY_UI_HIDDEN) {
+            releaseHeavyUiCaches();
+        }
+    }
+
+    private void releaseHeavyUiCaches() {
+        if (liveChart != null) liveChart.releaseMemory();
+        if (chart != null) chart.releaseMemory();
+        if (sessionList != null) sessionList.removeAllViews();
+        historySnapshot = null;
+        cachedSessions = null;
+        cachedEstimate = null;
+        cachedInsights = null;
+        lastHistoryRevision = -1L;
+        lastTrendRevision = Long.MIN_VALUE;
+        lastInsightRevision = Long.MIN_VALUE;
+        CalibrationStore.trimMemory();
+        SQLiteDatabase.releaseMemory();
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
@@ -193,114 +308,241 @@ public class MainActivity extends Activity {
         shell.setOrientation(LinearLayout.VERTICAL);
         shell.setBackgroundColor(bg);
         shell.setOnApplyWindowInsetsListener((v, insets) -> {
-            if (Build.VERSION.SDK_INT >= 30) {
-                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
-                shell.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-            } else shell.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
-                    insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            applyInsets(shell, insets);
             return insets;
         });
+
+        int maxContentWidth = dp(640);
+        int screenWidthPx = getResources().getDisplayMetrics().widthPixels;
+        int constrainedWidth = screenWidthPx > maxContentWidth ? maxContentWidth : ViewGroup.LayoutParams.MATCH_PARENT;
+
+        headerWrap = new FrameLayout(this);
         LinearLayout header = new LinearLayout(this);
-        header.setPadding(dp(20), dp(12), dp(20), dp(12));
+        header.setPadding(dp(18), dp(12), dp(18), dp(12));
         header.setGravity(Gravity.CENTER_VERTICAL);
         ImageView mark = new ImageView(this);
         mark.setImageResource(R.drawable.ic_launcher_foreground);
+        mark.setBackground(tileBackground());
+        mark.setPadding(dp(5), dp(5), dp(5), dp(5));
         mark.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        header.addView(mark, new LinearLayout.LayoutParams(dp(44), dp(44)));
-        LinearLayout titles = new LinearLayout(this); titles.setOrientation(LinearLayout.VERTICAL);
-        titles.addView(text("BatteryLens", 23, primary, Typeface.BOLD));
-        titles.addView(text("CHARGE · OBSERVE · UNDERSTAND", 12, secondary, Typeface.NORMAL));
-        header.addView(titles, weightedParams(1, 8));
-        autoChip = chip("Paused", accentBlue);
+        header.addView(mark, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        titles.addView(text("BatteryLens", 22, primary, Typeface.BOLD));
+        TextView subtitle = text("CHARGE · OBSERVE · UNDERSTAND", 10, secondary, Typeface.BOLD);
+        subtitle.setLetterSpacing(0.08f);
+        titles.addView(subtitle, marginTop(1));
+        header.addView(titles, weightedParams(1, 10));
+        autoChip = chip("○ Paused", warning);
+        autoChip.setOnClickListener(v -> {
+            if (selectedPage != 0) showPage(0);
+        });
         header.addView(autoChip);
-        shell.addView(header);
+        header.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or_, ob) -> {
+            Rect hit = new Rect();
+            autoChip.getHitRect(hit);
+            int minTap = dp(48);
+            int padX = Math.max(0, (minTap - hit.width()) / 2);
+            int padY = Math.max(0, (minTap - hit.height()) / 2);
+            hit.inset(-padX, -padY);
+            header.setTouchDelegate(new TouchDelegate(hit, autoChip));
+        });
+        FrameLayout.LayoutParams headerLp = new FrameLayout.LayoutParams(
+                constrainedWidth, ViewGroup.LayoutParams.WRAP_CONTENT);
+        headerLp.gravity = Gravity.CENTER_HORIZONTAL;
+        headerWrap.addView(header, headerLp);
+        shell.addView(headerWrap);
+        shell.addView(hairlineDivider());
 
         contentScroll = new ScrollView(this);
         contentScroll.setFillViewport(true);
-        LinearLayout pageStack = new LinearLayout(this); pageStack.setOrientation(LinearLayout.VERTICAL);
+        contentScroll.setVerticalScrollBarEnabled(false);
+        FrameLayout centerWrap = new FrameLayout(this);
+        LinearLayout pageStack = new LinearLayout(this);
+        pageStack.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout.LayoutParams stackLp = new FrameLayout.LayoutParams(
+                constrainedWidth, ViewGroup.LayoutParams.WRAP_CONTENT);
+        stackLp.gravity = Gravity.CENTER_HORIZONTAL;
         for (int i = 0; i < pages.length; i++) {
-            pages[i] = new LinearLayout(this); pages[i].setOrientation(LinearLayout.VERTICAL);
-            pages[i].setPadding(dp(18), dp(6), dp(18), dp(24)); pageStack.addView(pages[i]);
+            pages[i] = new LinearLayout(this);
+            pages[i].setOrientation(LinearLayout.VERTICAL);
+            pages[i].setPadding(dp(16), dp(12), dp(16), dp(24));
+            pageStack.addView(pages[i]);
         }
-        contentScroll.addView(pageStack);
+        centerWrap.addView(pageStack, stackLp);
+        contentScroll.addView(centerWrap);
         shell.addView(contentScroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        buildOverview(pages[0]); buildTrends(pages[1]); buildSessions(pages[2]); buildSettings(pages[3]);
+
+        shell.addView(hairlineDivider());
+        navWrap = new FrameLayout(this);
+        navWrap.setBackgroundColor(surface);
         LinearLayout navigation = new LinearLayout(this);
-        navigation.setPadding(dp(12), dp(8), dp(12), dp(8)); navigation.setBackgroundColor(surface);
+        navigation.setPadding(dp(12), dp(8), dp(12), dp(8));
         String[] labels = {"Overview", "Trends", "Sessions", "Settings"};
         for (int i = 0; i < pages.length; i++) {
-            final int index = i; tabs[i] = ghostButton(labels[i]);
-            tabs[i].setTextSize(12); tabs[i].setPadding(dp(3), dp(12), dp(3), dp(12));
+            final int index = i;
+            tabs[i] = ghostButton(labels[i]);
+            tabs[i].setTextSize(12);
+            tabs[i].setSingleLine(true);
+            tabs[i].setEllipsize(TextUtils.TruncateAt.END);
+            tabs[i].setPadding(dp(4), dp(10), dp(4), dp(10));
             tabs[i].setOnClickListener(v -> showPage(index));
             navigation.addView(tabs[i], weightedParams(1, i == 0 ? 0 : 6));
         }
-        shell.addView(navigation);
+        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(
+                constrainedWidth, ViewGroup.LayoutParams.WRAP_CONTENT);
+        navLp.gravity = Gravity.CENTER_HORIZONTAL;
+        navWrap.addView(navigation, navLp);
+        shell.addView(navWrap);
         setContentView(shell);
         showPage(selectedPage);
     }
 
+    private void applyInsets(View target, WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Insets sys = insets.getInsets(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            android.graphics.Insets ime = insets.getInsets(WindowInsets.Type.ime());
+            boolean imeVisible = ime.bottom > sys.bottom;
+            target.setPadding(0, 0, 0, imeVisible ? ime.bottom : 0);
+            if (headerWrap != null) headerWrap.setPadding(sys.left, sys.top, sys.right, 0);
+            if (contentScroll != null) contentScroll.setPadding(sys.left, 0, sys.right, 0);
+            if (navWrap != null) {
+                navWrap.setVisibility(imeVisible ? View.GONE : View.VISIBLE);
+                navWrap.setPadding(sys.left, 0, sys.right, sys.bottom);
+            }
+        } else {
+            applyInsetsLegacy(insets);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyInsetsLegacy(WindowInsets insets) {
+        int left = insets.getSystemWindowInsetLeft();
+        int top = insets.getSystemWindowInsetTop();
+        int right = insets.getSystemWindowInsetRight();
+        int bottom = insets.getSystemWindowInsetBottom();
+        if (headerWrap != null) headerWrap.setPadding(left, top, right, 0);
+        if (contentScroll != null) contentScroll.setPadding(left, 0, right, 0);
+        if (navWrap != null) navWrap.setPadding(left, 0, right, bottom);
+    }
+
+    private void ensurePageBuilt(int index) {
+        if (built[index]) return;
+        built[index] = true;
+        if (index == 0) buildOverview(pages[0]);
+        else if (index == 1) buildTrends(pages[1]);
+        else if (index == 2) buildSessions(pages[2]);
+        else buildSettings(pages[3]);
+    }
+
     private void showPage(int index) {
         selectedPage = Math.max(0, Math.min(pages.length - 1, index));
+        ensurePageBuilt(selectedPage);
+        int tabFillActive = Color.argb(38, 109, 235, 209);
+        int tabStrokeActive = Color.argb(120, 109, 235, 209);
+        int tabRipple = Color.argb(48, 109, 235, 209);
         for (int i = 0; i < pages.length; i++) {
-            pages[i].setVisibility(i == selectedPage ? View.VISIBLE : View.GONE);
-            tabs[i].setSelected(i == selectedPage);
-            tabs[i].setTextColor(i == selectedPage ? bg : secondary);
-            tabs[i].setBackground(chipDrawable(i == selectedPage ? accent : surface, i == selectedPage ? accent : surface, 16));
+            boolean active = i == selectedPage;
+            pages[i].setVisibility(active ? View.VISIBLE : View.GONE);
+            tabs[i].setSelected(active);
+            tabs[i].setTextColor(active ? accent : secondary);
+            tabs[i].setTypeface(active ? SANS_BOLD : SANS_REGULAR);
+            tabs[i].setBackground(rippleDrawable(active ? tabFillActive : Color.TRANSPARENT,
+                    active ? tabStrokeActive : Color.TRANSPARENT, 14, tabRipple));
         }
         contentScroll.post(() -> contentScroll.scrollTo(0, 0));
+        refreshVisiblePage();
     }
 
     private void buildOverview(LinearLayout root) {
-        LinearLayout live = card(true); root.addView(live);
-        live.addView(text("RIGHT NOW", 11, accent, Typeface.BOLD));
+        LinearLayout live = card(true);
+        root.addView(live);
+        live.addView(eyebrow("RIGHT NOW"));
         gauge = new BatteryGaugeView(this);
-        live.addView(gauge, new LinearLayout.LayoutParams(-1, dp(184)));
-        chargeStatus = text("Reading your battery…", 14, primary, Typeface.BOLD);
-        chargeStatus.setGravity(Gravity.CENTER); live.addView(chargeStatus);
+        live.addView(gauge, new LinearLayout.LayoutParams(-1, dp(196)));
+        chargeStatus = text("Reading your battery…", 13, secondary, Typeface.NORMAL);
+        chargeStatus.setGravity(Gravity.CENTER);
+        live.addView(chargeStatus);
         LinearLayout[] liveTiles = addMetricPair(live, "Battery power", "Temperature");
-        powerValue = (TextView) liveTiles[0].getChildAt(1); tempValue = (TextView) liveTiles[1].getChildAt(1);
+        powerValue = (TextView) liveTiles[0].getChildAt(1);
+        tempValue = (TextView) liveTiles[1].getChildAt(1);
         LinearLayout[] electrical = addMetricPair(live, "Current • signed", "Voltage");
-        currentValue = (TextView) electrical[0].getChildAt(1); voltageValue = (TextView) electrical[1].getChildAt(1);
+        currentValue = (TextView) electrical[0].getChildAt(1);
+        voltageValue = (TextView) electrical[1].getChildAt(1);
         live.addView(text("Power is measured at the battery, not the wall charger. Updates every 5 seconds while visible.", 12, secondary, Typeface.NORMAL), marginTop(12));
 
-        LinearLayout hero = section(root, "BATTERY HEALTH", "Estimated from charge progress, including slow charging to your protection limit");
-        healthValue = text("Learning", 38, accent, Typeface.BOLD); hero.addView(healthValue, marginTop(8));
+        LinearLayout hero = card(true);
+        root.addView(hero, marginTop(14));
+        hero.addView(eyebrow("BATTERY HEALTH"));
+        hero.addView(text("Estimated from charge progress, including slow charging to your protection limit", 13, secondary, Typeface.NORMAL), marginTop(6));
+        healthValue = text("Learning", 40, accent, Typeface.BOLD);
+        healthValue.setFontFeatureSettings("tnum");
+        hero.addView(healthValue, marginTop(10));
         healthSource = text("Collect a monitored charge session to begin.", 14, secondary, Typeface.NORMAL);
         hero.addView(healthSource, marginTop(4));
         LinearLayout[] healthTiles = addMetricPair(hero, "Full capacity", "Repeatability");
-        capacityValue = (TextView) healthTiles[0].getChildAt(1); confidenceValue = (TextView) healthTiles[1].getChildAt(1);
-        baselineSummary = text("", 12, secondary, Typeface.NORMAL); hero.addView(baselineSummary, marginTop(12));
+        capacityValue = (TextView) healthTiles[0].getChildAt(1);
+        confidenceValue = (TextView) healthTiles[1].getChildAt(1);
+        baselineSummary = text("", 12, secondary, Typeface.NORMAL);
+        baselineSummary.setPadding(0, dp(4), 0, dp(4));
+        baselineSummary.setOnClickListener(v -> {
+            if (CalibrationStore.designCapacity(this) <= 0) showPage(3);
+        });
+        hero.addView(baselineSummary, marginTop(10));
 
-        LinearLayout monitor = section(root, "Session monitor", "Enable monitoring once, then charge normally. A persistent notification keeps monitoring visible and lets you stop it.");
-        autoSwitch = new Switch(this); autoSwitch.setText("Automatic monitoring"); autoSwitch.setTextColor(primary);
-        autoSwitch.setTextSize(16); autoSwitch.setMinHeight(dp(48));
-        autoSwitch.setChecked(CalibrationStore.isAutoEnabled(this)); monitor.addView(autoSwitch, marginTop(10));
-        autoStatus = text("", 14, primary, Typeface.NORMAL); monitor.addView(autoStatus, marginTop(10));
+        LinearLayout monitor = section(root, "Session monitor", "Automatic monitoring runs in the background and resumes after restarts. A persistent notification keeps it visible.");
+        autoSwitch = new Switch(this);
+        autoSwitch.setText("Automatic monitoring");
+        autoSwitch.setTextColor(primary);
+        autoSwitch.setTextSize(15);
+        autoSwitch.setTypeface(SANS_REGULAR);
+        autoSwitch.setMinHeight(dp(48));
+        styleSwitch(autoSwitch);
+        autoSwitch.setChecked(CalibrationStore.isAutoEnabled(this));
+        monitor.addView(autoSwitch, marginTop(10));
+        autoStatus = text("", 14, primary, Typeface.NORMAL);
+        monitor.addView(autoStatus, marginTop(10));
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        progress.setMax(30); progress.setProgressTintList(android.content.res.ColorStateList.valueOf(accent));
-        monitor.addView(progress, new LinearLayout.LayoutParams(-1, dp(12)));
-        monitorHelp = text("", 12, secondary, Typeface.NORMAL); monitor.addView(monitorHelp, marginTop(8));
-        manualButton = ghostButton("Start a manual session"); monitor.addView(manualButton, marginTop(12));
+        progress.setMax(30);
+        styleProgressBar(progress);
+        monitor.addView(progress, marginTop(10, dp(10)));
+        monitorHelp = text("", 12, secondary, Typeface.NORMAL);
+        monitor.addView(monitorHelp, marginTop(8));
+        manualButton = ghostButton("Start a manual session");
+        monitor.addView(manualButton, marginTop(12));
         manualButton.setOnClickListener(v -> toggleManualSession());
         autoSwitch.setOnCheckedChangeListener((v, enabled) -> {
             if (updatingSwitch) return;
-            if (!enabled) CalibrationStore.finishCheckpoint(this, "Automatic monitoring disabled");
-            CalibrationStore.setAutoEnabled(this, enabled);
             if (enabled) {
+                CalibrationStore.setAutoEnabled(this, true);
                 requestNotifications();
                 if (!BatteryMonitorService.start(this)) toast("Android blocked monitoring. Check app battery settings.");
-            } else stopService(new Intent(this, BatteryMonitorService.class));
+                MonitorWatchdogJobService.schedule(this);
+            } else {
+                CalibrationStore.disableAutoAsync(this, "Automatic monitoring disabled", () -> {
+                    if (!isGone() && visible) refreshBattery();
+                });
+                MonitorWatchdogJobService.cancel(this);
+                BatteryMonitorService.stopMonitoring(this);
+            }
             refreshBattery();
         });
 
         LinearLayout cycles = section(root, "Battery cycles", "One full cycle represents about 100% of battery use across partial discharges.");
         LinearLayout[] cycleTiles = addMetricPair(cycles, "Lifetime • device", "Observed • this app");
-        cyclesValue = (TextView) cycleTiles[0].getChildAt(1); observedValue = (TextView) cycleTiles[1].getChildAt(1);
-        cycleExplanation = text("", 13, secondary, Typeface.NORMAL); cycles.addView(cycleExplanation, marginTop(12));
+        cyclesValue = (TextView) cycleTiles[0].getChildAt(1);
+        observedValue = (TextView) cycleTiles[1].getChildAt(1);
+        cycleExplanation = text("", 13, secondary, Typeface.NORMAL);
+        cycles.addView(cycleExplanation, marginTop(12));
+
         LinearLayout eta = section(root, "Charging time", "Android’s estimate may be unavailable when charging is paused or limited by Battery Protection.");
-        timeValue = text("—", 23, primary, Typeface.BOLD); eta.addView(timeValue, marginTop(10));
+        timeValue = text("—", 24, primary, Typeface.BOLD);
+        timeValue.setFontFeatureSettings("tnum");
+        eta.addView(timeValue, marginTop(10));
         chargeInfo = text("Waiting for charging data", 13, secondary, Typeface.NORMAL);
         eta.addView(chargeInfo, marginTop(8));
+
         LinearLayout insights = section(root, "Today's battery insights", "Observed while BatteryLens was running. Rates need enough unplugged readings; missing time is excluded.");
         LinearLayout[] drainTiles = addMetricPair(insights, "Interactive drain", "Idle drain");
         screenDrainValue = (TextView) drainTiles[0].getChildAt(1);
@@ -312,32 +554,37 @@ public class MainActivity extends Activity {
     }
 
     private void buildTrends(LinearLayout root) {
-        root.addView(text("The rhythm of your battery", 25, primary, Typeface.BOLD));
+        root.addView(text("The rhythm of your battery", 24, primary, Typeface.BOLD));
         root.addView(text("Readings collected while this app is visible or monitoring runs.", 14, secondary, Typeface.NORMAL), marginTop(6));
         LinearLayout plot = section(root, "Live history", "Up to 7 days on this phone. Readings are spaced about five minutes apart; missing time stays as a gap.");
-        Button metric = ghostButton(trendMetricLabel()); plot.addView(metric, marginTop(12));
-        metric.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Chart measurement")
-                .setItems(new String[]{"Battery level (%)", "Current (mA)", "Temperature (°C)"}, (d, i) -> {
-                    trendMetric = i; metric.setText(trendMetricLabel()); refreshTrends();
-                }).show());
-        Button window = ghostButton(trendWindowLabel()); plot.addView(window, marginTop(8));
-        window.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Time window")
-                .setItems(new String[]{"Past hour", "Past 6 hours", "Past 24 hours", "Past 7 days"}, (d, i) -> {
-                    trendHours = new int[]{1, 6, 24, 168}[i]; window.setText(trendWindowLabel()); refreshTrends();
-                }).show());
-        liveChart = new LiveChartView(this); plot.addView(liveChart, new LinearLayout.LayoutParams(-1, dp(220)));
+        LinearLayout metricBar = segmentedBar(new String[]{"Level %", "Current mA", "Temp °C"}, trendMetric, index -> {
+            trendMetric = index;
+            refreshTrends();
+        });
+        plot.addView(metricBar, marginTop(12));
+        int windowIdx = trendHours == 1 ? 0 : trendHours == 6 ? 1 : trendHours == 24 ? 2 : 3;
+        LinearLayout windowBar = segmentedBar(new String[]{"1h", "6h", "24h", "7d"}, windowIdx, index -> {
+            trendHours = new int[]{1, 6, 24, 168}[index];
+            refreshTrends();
+        });
+        plot.addView(windowBar, marginTop(8));
+        liveChart = new LiveChartView(this);
+        plot.addView(liveChart, marginTop(8, dp(220)));
         trendSummary = text("Waiting for readings", 14, primary, Typeface.NORMAL);
-        trendSummary.setLineSpacing(dp(4), 1f); plot.addView(trendSummary, marginTop(10));
+        trendSummary.setLineSpacing(dp(4), 1f);
+        plot.addView(trendSummary, marginTop(10));
         LinearLayout meaning = section(root, "Reading the chart", "Positive current means energy is entering the battery; negative means it is leaving, according to Android’s API. Some firmware reports different units or signs. This app does not guess a correction.");
         meaning.addView(text("Observed drain needs at least 30 minutes and a 2-point level drop while unplugged. It excludes large jumps, charging, and monitoring gaps. It is not a prediction of remaining battery life.", 13, secondary, Typeface.NORMAL), marginTop(10));
-        Button export = filledButton("Export live readings as CSV"); root.addView(export, marginTop(14));
+        Button export = filledButton("Export live readings as CSV");
+        root.addView(export, marginTop(14));
         export.setOnClickListener(v -> exportTrends());
-        Button clear = ghostButton("Clear live history"); root.addView(clear, marginTop(10));
+        Button clear = ghostButton("Clear live history");
+        root.addView(clear, marginTop(10));
         clear.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Clear live history?")
                 .setMessage("Removes the stored chart readings. Charging sessions and observed cycles are kept. New readings will continue while monitoring or the app is open.")
                 .setNegativeButton("Keep", null).setPositiveButton("Clear", (d, i) -> {
                     TrendStore.clear(this, success -> {
-                        if (isDestroyed()) return;
+                        if (isGone()) return;
                         if (success) {
                             cachedInsights = null;
                             lastTrendRevision = Long.MIN_VALUE;
@@ -348,19 +595,24 @@ public class MainActivity extends Activity {
                 }).show());
     }
 
-    private String trendMetricLabel() { return new String[]{"Battery level · %", "Current · mA", "Temperature · °C"}[trendMetric]; }
-    private String trendWindowLabel() { return trendHours == 168 ? "Past 7 days" : "Past " + trendHours + " hours"; }
-    private String healthWindowLabel() { return healthWindowDays == 0 ? "Lifetime · latest 12" : "Past " + healthWindowDays + " days"; }
-
     private void refreshTrends() {
+        if (!built[1] || selectedPage != 1 || trendsLoading) return;
         long revision = TrendStore.revision(), now = System.currentTimeMillis();
         if (revision == lastTrendRevision && trendHours == lastTrendHours && trendMetric == lastTrendMetric
                 && now >= lastTrendRefresh && now - lastTrendRefresh < 60_000) return;
-        lastTrendRevision = revision; lastTrendHours = trendHours; lastTrendMetric = trendMetric;
-        lastTrendRefresh = now;
+        trendsLoading = true;
         final int requestedHours = trendHours, requestedMetric = trendMetric;
         TrendStore.requestPoints(this, requestedHours * 3_600_000L, (points, loadedRevision) -> {
-            if (isDestroyed() || trendHours != requestedHours || trendMetric != requestedMetric) return;
+            trendsLoading = false;
+            if (isGone() || !built[1]) return;
+            if (trendHours != requestedHours || trendMetric != requestedMetric) {
+                refreshTrends();
+                return;
+            }
+            lastTrendRevision = loadedRevision;
+            lastTrendHours = requestedHours;
+            lastTrendMetric = requestedMetric;
+            lastTrendRefresh = System.currentTimeMillis();
             renderTrends(points);
         });
     }
@@ -372,65 +624,122 @@ public class MainActivity extends Activity {
                 : stats.count + " readings · " + formatDuration(stats.observedMs) + " observed"
                 + "\nTemperature range: " + (Double.isFinite(stats.minTemp) ? one.format(stats.minTemp) + "–" + one.format(stats.maxTemp) + "°C" : "Unavailable")
                 + "\nObserved drain: " + (Double.isFinite(stats.drainPerHour) ? one.format(stats.drainPerHour) + " percentage points/hour" : "Collecting unplugged observations")
-                + "\nLatest reading: " + shortDate.format(new Date(points.get(points.size() - 1).time)));
+                + "\nLatest reading: " + formatShortDate(points.get(points.size() - 1).time));
     }
 
     private void exportTrends() {
         TrendStore.requestPoints(this, TrendStore.RETENTION_MS, (points, revision) -> {
-            if (!isDestroyed()) startTrendExport(points);
+            if (!isGone()) startTrendExport(points);
         });
     }
 
     private void startTrendExport(List<TrendPoint> points) {
         if (points.isEmpty()) { toast("No live readings to export"); return; }
         pendingCsv = CsvExports.trends(points);
+        awaitingDocumentPicker = true;
         startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("text/csv").putExtra(Intent.EXTRA_TITLE, "BatteryLens-live-readings.csv"), 77);
     }
 
     private void buildSessions(LinearLayout root) {
-        root.addView(text("Your battery, over time", 25, primary, Typeface.BOLD));
+        root.addView(text("Your battery, over time", 24, primary, Typeface.BOLD));
         root.addView(text("A longer history gives context to each estimate.", 14, secondary, Typeface.NORMAL), marginTop(6));
         LinearLayout trend = section(root, "Capacity trend", "Only new multi-point measurements are eligible. Earlier endpoint estimates stay in the journal for comparison.");
-        Button healthWindow = ghostButton(healthWindowLabel()); trend.addView(healthWindow, marginTop(10));
-        healthWindow.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Health trend window")
-                .setItems(new String[]{"Past 7 days", "Past 30 days", "Past 90 days", "Lifetime"}, (d, i) -> {
-                    healthWindowDays = new int[]{7, 30, 90, 0}[i];
-                    healthWindow.setText(healthWindowLabel());
-                    chart.setData(CalibrationStore.sessions(this), CalibrationStore.designCapacity(this), healthWindowDays);
-                }).show());
-        chart = new HealthChartView(this); trend.addView(chart, new LinearLayout.LayoutParams(-1, dp(180)));
+        int hwIdx = healthWindowDays == 7 ? 0 : healthWindowDays == 30 ? 1 : healthWindowDays == 90 ? 2 : 3;
+        LinearLayout hwBar = segmentedBar(new String[]{"7d", "30d", "90d", "All"}, hwIdx, index -> {
+            healthWindowDays = new int[]{7, 30, 90, 0}[index];
+            if (cachedSessions != null) chart.setData(cachedSessions, CalibrationStore.designCapacity(this), healthWindowDays);
+        });
+        trend.addView(hwBar, marginTop(12));
+        chart = new HealthChartView(this);
+        trend.addView(chart, marginTop(8, dp(180)));
         LinearLayout history = section(root, "Charging journal", "Up to 60 sessions. Tap a session for its measurements and validation result.");
-        sessionSummary = text("", 14, accent, Typeface.BOLD); history.addView(sessionSummary, marginTop(12));
-        Button filter = ghostButton(sessionFilterLabel()); history.addView(filter, marginTop(12));
-        filter.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Show sessions")
-                .setItems(new String[]{"All sessions", "Eligible sessions", "History only"}, (d, i) -> {
-                    sessionFilter = i; filter.setText(sessionFilterLabel()); refreshBattery();
-                }).show());
-        historyValue = text("No sessions yet", 14, primary, Typeface.NORMAL); historyValue.setLineSpacing(dp(3), 1.1f);
+        sessionSummary = text("", 13, accent, Typeface.BOLD);
+        history.addView(sessionSummary, marginTop(12));
+        LinearLayout filterBar = segmentedBar(new String[]{"All", "Eligible", "History"}, sessionFilter, index -> {
+            sessionFilter = index;
+            if (cachedSessions != null) updateHistory(cachedSessions, CalibrationStore.designCapacity(this));
+        });
+        history.addView(filterBar, marginTop(10));
+        historyValue = text("No sessions yet", 14, primary, Typeface.NORMAL);
+        historyValue.setLineSpacing(dp(3), 1.1f);
         history.addView(historyValue, marginTop(12));
-        sessionList = new LinearLayout(this); sessionList.setOrientation(LinearLayout.VERTICAL); history.addView(sessionList);
-        Button export = filledButton("Export all sessions as CSV"); root.addView(export, marginTop(14));
+        sessionList = new LinearLayout(this);
+        sessionList.setOrientation(LinearLayout.VERTICAL);
+        history.addView(sessionList);
+        Button export = filledButton("Export all sessions as CSV");
+        root.addView(export, marginTop(14));
         export.setOnClickListener(v -> exportSessions());
-        Button clear = ghostButton("Clear calibration history"); root.addView(clear, marginTop(10));
+        Button clear = ghostButton("Clear calibration history");
+        root.addView(clear, marginTop(10));
         clear.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Clear calibration history?")
                 .setMessage("This removes saved capacity estimates and cancels the current calibration session. Observed cycles are kept.")
                 .setNegativeButton("Keep history", null).setPositiveButton("Clear", (dialog, which) -> {
-                    CalibrationStore.clearHistory(this); refreshBattery();
+                    CalibrationStore.clearHistoryAsync(this, (changed, note) -> {
+                        if (isGone()) return;
+                        cachedSessions = null;
+                        cachedEstimate = null;
+                        historySnapshot = null;
+                        lastHistoryRevision = -1L;
+                        refreshBattery();
+                        BatteryWidgetUpdater.updateAllIfPinnedAsync(this);
+                    });
                 }).show());
     }
 
     private void buildSettings(LinearLayout root) {
         root.addView(text("Make it work for you", 25, primary, Typeface.BOLD));
-        LinearLayout setup = section(root, "Samsung & background monitoring", "On your S24 FE, set BatteryLens battery usage to Unrestricted and remove it from Sleeping / Deep sleeping apps if needed. After a reboot or force-stop, open BatteryLens again. Android can still interrupt monitoring; gaps are never silently treated as continuous charging.");
-        Button settings = ghostButton("Open Android app settings"); setup.addView(settings, marginTop(12));
+        LinearLayout setup = section(root, "Background monitoring & restart survival", "Set BatteryLens battery usage to Unrestricted and exempt it from Sleeping / Deep sleeping apps so monitoring continues reliably across screen-off charging and phone restarts.");
+        Button settings = ghostButton("Open Android app settings");
+        setup.addView(settings, marginTop(12));
         settings.setOnClickListener(v -> openAppSettings());
-        Button notifications = ghostButton("Enable notifications"); setup.addView(notifications, marginTop(10));
-        notifications.setOnClickListener(v -> {
-            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestNotifications();
-            else startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+        notificationsButton = ghostButton(areNotificationsAllowed() ? "Notification settings · Enabled" : "Enable notifications");
+        setup.addView(notificationsButton, marginTop(10));
+        notificationsButton.setOnClickListener(v -> {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                if (CalibrationStore.prefs(this).getBoolean(KEY_NOTIF_PROMPTED, false)
+                        && !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
+                    openNotificationSettings();
+                } else {
+                    requestNotifications();
+                }
+            } else {
+                openNotificationSettings();
+            }
         });
-        LinearLayout limit = section(root, "Battery Protection limit", "Set the limit selected in your phone settings, or leave it on Auto. Auto recognizes common limits when Android reports that charging stopped. A custom limit can be set manually. This setting does not change your phone's limit.");
+
+        LinearLayout widgets = section(root, "Home screen widgets", "Choose a size to add BatteryLens to your Home screen, or drag-resize a widget later.");
+        final WidgetSnapshot.WidgetSize[] widgetSizes = {
+                WidgetSnapshot.WidgetSize.COMPACT_2X1,
+                WidgetSnapshot.WidgetSize.SQUARE_2X2,
+                WidgetSnapshot.WidgetSize.WIDE_4X1,
+                WidgetSnapshot.WidgetSize.DASHBOARD_4X2
+        };
+        final String[] widgetNotes = {
+                "Compact (2×1) — Level %, state badge, temp, power & health.",
+                "Status (2×2) — Hero level, power, temp tiles, live badge & refresh.",
+                "Wide Strip (4×1) — Single-row telemetry bar with health & monitor state.",
+                "Dashboard (4×2) — Full 4-tile Overview card & active charge progress."
+        };
+        final int[] chosenWidgetIndex = {1};
+        TextView widgetSummary = text(widgetNotes[1], 13, secondary, Typeface.NORMAL);
+        widgets.addView(segmentedBar(new String[]{"2×1", "2×2", "4×1", "4×2"}, 1, idx -> {
+            chosenWidgetIndex[0] = idx;
+            widgetSummary.setText(widgetNotes[idx]);
+        }), marginTop(12));
+        widgets.addView(widgetSummary, marginTop(8));
+        Button addWidgetBtn = ghostButton(BatteryWidgetUpdater.canRequestPin(this)
+                ? "Add selected widget"
+                : "How to add widget");
+        widgets.addView(addWidgetBtn, marginTop(12));
+        addWidgetBtn.setOnClickListener(v -> {
+            WidgetSnapshot.WidgetSize selected = widgetSizes[chosenWidgetIndex[0]];
+            if (!BatteryWidgetUpdater.requestPin(this, selected)) {
+                toast("Long-press your Home screen → Widgets → BatteryLens");
+            }
+        });
+
+        LinearLayout limit = section(root, "Battery Protection limit", "Set the charge limit configured on your phone, or leave it on Auto. Auto recognizes common limits when Android reports charging stopped.");
         Button limitButton = ghostButton(chargeLimitLabel(CalibrationStore.chosenChargeLimit(this)));
         limit.addView(limitButton, marginTop(12));
         limitButton.setOnClickListener(v -> {
@@ -440,7 +749,8 @@ public class MainActivity extends Activity {
                 if (index == values.length) {
                     EditText input = new EditText(this);
                     input.setInputType(InputType.TYPE_CLASS_NUMBER);
-                    input.setHint("50–100%"); input.setPadding(dp(20), dp(10), dp(20), dp(10));
+                    input.setHint("50–100%");
+                    input.setPadding(dp(20), dp(10), dp(20), dp(10));
                     new AlertDialog.Builder(this).setTitle("Custom protection limit")
                             .setView(input).setNegativeButton("Cancel", null)
                             .setPositiveButton("Save", (dialog, which) -> {
@@ -455,62 +765,93 @@ public class MainActivity extends Activity {
                 saveChargeLimit(values[index], limitButton);
             }).show();
         });
-        LinearLayout activity = section(root, "Activity context", "Mark hotspot use yourself when testing its effect on drain or charging. Android does not reliably expose another app's hotspot state to BatteryLens. No extra permissions are needed.");
-        Switch hotspotSwitch = new Switch(this); hotspotSwitch.setText("I am using hotspot");
-        hotspotSwitch.setTextColor(primary); hotspotSwitch.setMinHeight(dp(48));
-        hotspotSwitch.setChecked(getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).getBoolean("hotspot_marker", false));
+
+        LinearLayout activity = section(root, "Activity context", "Mark hotspot use yourself when testing its effect on drain or charging. Android does not reliably expose another app's hotspot state.");
+        Switch hotspotSwitch = new Switch(this);
+        hotspotSwitch.setText("I am using hotspot");
+        hotspotSwitch.setTextSize(15);
+        hotspotSwitch.setTextColor(primary);
+        hotspotSwitch.setTypeface(SANS_REGULAR);
+        hotspotSwitch.setMinHeight(dp(48));
+        styleSwitch(hotspotSwitch);
+        hotspotSwitch.setChecked(CalibrationStore.prefs(this).getBoolean("hotspot_marker", false));
         activity.addView(hotspotSwitch, marginTop(10));
         hotspotSwitch.setOnCheckedChangeListener((v, checked) -> {
-            getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).edit().putBoolean("hotspot_marker", checked).apply();
+            CalibrationStore.prefs(this).edit().putBoolean("hotspot_marker", checked).apply();
             refreshBattery();
         });
-        LinearLayout alerts = section(root, "Charge care", "Choose charge, temperature, and low-battery notification thresholds. Alerts work while monitoring runs. These do not change Samsung Battery Protection.");
-        Switch alertSwitch = new Switch(this); alertSwitch.setText("Enable battery alerts");
-        alertSwitch.setTextSize(15); alertSwitch.setTextColor(primary); alertSwitch.setMinHeight(dp(48));
-        alertSwitch.setChecked(getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).getBoolean("alerts", false));
+
+        LinearLayout alerts = section(root, "Charge care", "Choose charge, temperature, and low-battery notification thresholds while monitoring runs.");
+        Switch alertSwitch = new Switch(this);
+        alertSwitch.setText("Enable battery alerts");
+        alertSwitch.setTextSize(15);
+        alertSwitch.setTextColor(primary);
+        alertSwitch.setTypeface(SANS_REGULAR);
+        alertSwitch.setMinHeight(dp(48));
+        styleSwitch(alertSwitch);
+        alertSwitch.setChecked(CalibrationStore.prefs(this).getBoolean("alerts", false));
         alerts.addView(alertSwitch, marginTop(10));
         alertSwitch.setOnCheckedChangeListener((v, enabled) -> {
-            getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).edit().putBoolean("alerts", enabled).apply();
+            CalibrationStore.prefs(this).edit().putBoolean("alerts", enabled).apply();
             if (enabled) { requestNotifications(); toast("Alerts run while monitoring is enabled"); }
         });
-        int target = getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).getInt("charge_target", 80);
-        Button targetButton = ghostButton("Charge target: " + target + "%"); alerts.addView(targetButton, marginTop(10));
-        targetButton.setOnClickListener(v -> {
-            String[] options = {"70%", "80%", "85%", "90%", "100%"}; int[] values = {70, 80, 85, 90, 100};
-            new AlertDialog.Builder(this).setTitle("Charge notification target").setItems(options, (d, index) -> {
-                getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).edit().putInt("charge_target", values[index]).apply();
-                targetButton.setText("Charge target: " + values[index] + "%");
-            }).show();
-        });
-        addThresholdButton(alerts, "Temperature alert", "heat_target", 42,
-                new String[]{"38°C", "40°C", "42°C", "45°C"}, new int[]{38, 40, 42, 45}, "°C");
-        addThresholdButton(alerts, "Low battery", "low_target", 0,
-                new String[]{"Off", "10%", "15%", "20%", "25%"}, new int[]{0, 10, 15, 20, 25}, "%");
-        alerts.addView(text("Thresholds are reminders you choose, not a battery safety diagnosis. Repeated alerts are suppressed until the reading recovers.", 12, secondary, Typeface.NORMAL), marginTop(10));
-        LinearLayout design = section(root, "Rated capacity", "S24 FE uses 4565 mAh rated (4700 mAh typical). Use a documented baseline for your model; changing it affects displayed health, not measured capacity.");
-        designCapacityInput = new EditText(this); designCapacityInput.setTextColor(primary); designCapacityInput.setHintTextColor(secondary);
-        designCapacityInput.setTextSize(18); designCapacityInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        float stored = CalibrationStore.designCapacity(this); designCapacityInput.setText(stored > 0 ? String.valueOf(Math.round(stored)) : "");
-        designCapacityInput.setHint("Rated capacity in mAh"); designCapacityInput.setContentDescription("Rated battery capacity in milliamp hours");
-        designCapacityInput.setSingleLine(true); designCapacityInput.setBackground(inputBackground());
-        designCapacityInput.setPadding(dp(14), dp(12), dp(14), dp(12)); design.addView(designCapacityInput, marginTop(12));
-        Button save = filledButton("Save rated capacity"); design.addView(save, marginTop(10)); save.setOnClickListener(v -> saveDesignCapacity());
-        LinearLayout diagnostics = section(root, "Device compatibility", "Some firmware exposes lifetime cycles; some restricts them. This checks the public Android reading and readable cycle-count files without root. A reported zero can be a firmware placeholder.");
-        Button check = ghostButton("Check compatibility"); diagnostics.addView(check, marginTop(12));
+        addThresholdSegmented(alerts, "Charge notification target", "charge_target", 80,
+                new String[]{"70%", "80%", "85%", "90%", "100%"}, new int[]{70, 80, 85, 90, 100}, 1);
+        addThresholdSegmented(alerts, "Temperature alert", "heat_target", 42,
+                new String[]{"38°C", "40°C", "42°C", "45°C"}, new int[]{38, 40, 42, 45}, 2);
+        addThresholdSegmented(alerts, "Low battery reminder", "low_target", 0,
+                new String[]{"Off", "10%", "15%", "20%", "25%"}, new int[]{0, 10, 15, 20, 25}, 0);
+        alerts.addView(text("Thresholds are personal reminders, not a battery safety diagnosis. Repeated alerts are suppressed until the reading recovers.", 12, secondary, Typeface.NORMAL), marginTop(10));
+
+        LinearLayout design = section(root, "Rated capacity", "Enter your device's rated battery capacity in mAh (e.g., S24 FE uses 4565 mAh rated / 4700 mAh typical). Affects displayed health %, not measured mAh.");
+        designCapacityInput = new EditText(this);
+        designCapacityInput.setTextColor(primary);
+        designCapacityInput.setHintTextColor(secondary);
+        designCapacityInput.setTextSize(18);
+        designCapacityInput.setFontFeatureSettings("tnum");
+        designCapacityInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        float stored = CalibrationStore.designCapacity(this);
+        designCapacityInput.setText(stored > 0 ? String.valueOf(Math.round(stored)) : "");
+        designCapacityInput.setHint("Rated capacity in mAh");
+        designCapacityInput.setContentDescription("Rated battery capacity in milliamp hours");
+        designCapacityInput.setSingleLine(true);
+        designCapacityInput.setBackground(inputBackground());
+        designCapacityInput.setPadding(dp(14), dp(12), dp(14), dp(12));
+        design.addView(designCapacityInput, marginTop(12));
+        Button save = filledButton("Save rated capacity");
+        design.addView(save, marginTop(10));
+        save.setOnClickListener(v -> saveDesignCapacity());
+
+        LinearLayout diagnostics = section(root, "Device compatibility", "Checks public Android readings and ordinary-app-readable cycle files without root. A reported zero can be a firmware placeholder.");
+        Button check = ghostButton("Check compatibility");
+        diagnostics.addView(check, marginTop(12));
         check.setOnClickListener(v -> {
-            check.setEnabled(false); check.setText("Checking…");
-            new Thread(() -> {
+            check.setEnabled(false);
+            check.setText("Checking…");
+            AppWorker.execute(() -> {
                 CycleReader.scan();
-                runOnUiThread(() -> { if (!isDestroyed()) { check.setEnabled(true); check.setText("Check compatibility"); refreshBattery(); } });
-            }, "battery-compatibility").start();
+                AppWorker.postMain(() -> {
+                    if (!isGone()) {
+                        check.setEnabled(true);
+                        check.setText("Check compatibility");
+                        refreshBattery();
+                    }
+                });
+            });
         });
-        rawValue = text("", 13, secondary, Typeface.NORMAL); rawValue.setTextIsSelectable(true);
-        rawValue.setLineSpacing(dp(3), 1.1f); diagnostics.addView(rawValue, marginTop(12));
-        Button copy = ghostButton("Copy device diagnostics"); diagnostics.addView(copy, marginTop(12)); copy.setOnClickListener(v -> copyDiagnostics());
-        LinearLayout accuracy = section(root, "Getting useful estimates", "Charge across at least 30 percentage points before any 80%, 85%, 90%, 95%, or 100% limit. A 20→80% session is enough. You can leave the hotspot on, but the battery must still gain charge. No need to disable protection or drain to zero.");
-        accuracy.addView(text("The app excludes a long pause at the limit and checks many points along each charging session. If hotspot use or very slow charging makes readings disagree, it records the session as uncertain instead of lowering health. Three consistent sessions are needed for a headline health figure. An estimate cannot replace a service-center battery test.", 13, secondary, Typeface.NORMAL), marginTop(10));
+        rawValue = text("", 13, secondary, Typeface.NORMAL);
+        rawValue.setTextIsSelectable(true);
+        rawValue.setLineSpacing(dp(3), 1.1f);
+        diagnostics.addView(rawValue, marginTop(12));
+        Button copy = ghostButton("Copy device diagnostics");
+        diagnostics.addView(copy, marginTop(12));
+        copy.setOnClickListener(v -> copyDiagnostics());
+
+        LinearLayout accuracy = section(root, "Getting useful estimates", "Charge across at least 30 percentage points below your limit (e.g., 20→80%). Three consistent sessions are needed for a headline health percentage.");
+        accuracy.addView(text("BatteryLens excludes long pauses at your limit and checks many points along each charge. Unstable sessions stay as history without skewing health.", 13, secondary, Typeface.NORMAL), marginTop(10));
         TextView footer = text("BatteryLens 3.4 · Offline by design\nNo ads. No analytics. Your data stays on this phone.", 12, secondary, Typeface.NORMAL);
-        footer.setGravity(Gravity.CENTER); root.addView(footer, marginTop(20));
+        footer.setGravity(Gravity.CENTER);
+        root.addView(footer, marginTop(20));
     }
 
     private String chargeLimitLabel(int value) {
@@ -520,26 +861,34 @@ public class MainActivity extends Activity {
     }
 
     private void saveChargeLimit(int value, Button button) {
-        getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).edit()
-                .putInt("measurement_charge_limit", value).apply();
+        CalibrationStore.prefs(this).edit().putInt("measurement_charge_limit", value).apply();
         button.setText(chargeLimitLabel(value));
         toast("Charge limit saved for future sessions");
     }
 
-    private void addThresholdButton(LinearLayout parent, String title, String key, int fallback,
-                                    String[] labels, int[] values, String unit) {
-        int value = getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).getInt(key, fallback);
-        Button button = ghostButton(title + ": " + (value == 0 ? "Off" : value + unit)); parent.addView(button, marginTop(10));
-        button.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle(title).setItems(labels, (d, i) -> {
-            getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).edit().putInt(key, values[i]).apply();
-            button.setText(title + ": " + labels[i]);
-        }).show());
+    private static int indexOfInt(int[] values, int target, int fallbackIndex) {
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == target) return i;
+        }
+        return fallbackIndex;
+    }
+
+    private void addThresholdSegmented(LinearLayout parent, String title, String key, int fallback,
+                                       String[] labels, int[] values, int fallbackIndex) {
+        parent.addView(text(title, 12, secondary, Typeface.BOLD), marginTop(12));
+        int current = CalibrationStore.prefs(this).getInt(key, fallback);
+        parent.addView(segmentedBar(labels, indexOfInt(values, current, fallbackIndex), index ->
+                CalibrationStore.prefs(this).edit().putInt(key, values[index]).apply()), marginTop(6));
     }
 
     private LinearLayout section(LinearLayout root, String title, String subtitle) {
-        LinearLayout section = card(false); root.addView(section, marginTop(14));
-        TextView heading = text(title, 17, primary, Typeface.BOLD); heading.setAccessibilityHeading(true); section.addView(heading);
-        section.addView(text(subtitle, 13, secondary, Typeface.NORMAL), marginTop(6)); return section;
+        LinearLayout section = card(false);
+        root.addView(section, marginTop(14));
+        TextView heading = text(title, 17, primary, Typeface.BOLD);
+        if (Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
+        section.addView(heading);
+        section.addView(text(subtitle, 13, secondary, Typeface.NORMAL), marginTop(6));
+        return section;
     }
 
     private LinearLayout[] addMetricPair(LinearLayout parent, String first, String second) {
@@ -549,12 +898,45 @@ public class MainActivity extends Activity {
         LinearLayout a = metricTile(first), b = metricTile(second);
         row.addView(a, stacked ? marginTop(0) : weightedParams(1, 0));
         row.addView(b, stacked ? marginTop(8) : weightedParams(1, 8));
-        parent.addView(row, marginTop(14)); return new LinearLayout[]{a, b};
+        parent.addView(row, marginTop(14));
+        return new LinearLayout[]{a, b};
+    }
+
+    private void requestNotificationsOnce() {
+        if (Build.VERSION.SDK_INT < 33) return;
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        SharedPreferences p = CalibrationStore.prefs(this);
+        if (p.getBoolean(KEY_NOTIF_PROMPTED, false)) return;
+        p.edit().putBoolean(KEY_NOTIF_PROMPTED, true).apply();
+        requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 42);
     }
 
     private void requestNotifications() {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            CalibrationStore.prefs(this).edit().putBoolean(KEY_NOTIF_PROMPTED, true).apply();
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 42);
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 42 && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            BatteryMonitorService.refreshNotification(this);
+            refreshBattery();
+        }
+    }
+
+    private boolean areNotificationsAllowed() {
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        return nm != null && nm.areNotificationsEnabled();
+    }
+
+    private void openNotificationSettings() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+        } else {
+            openAppSettings();
+        }
     }
 
     private void openAppSettings() {
@@ -562,27 +944,34 @@ public class MainActivity extends Activity {
     }
 
     private void exportSessions() {
-        List<CalibrationStore.Session> sessions = CalibrationStore.sessions(this);
-        if (sessions.isEmpty()) { toast("No sessions to export yet"); return; }
-        pendingCsv = CsvExports.sessions(sessions);
-        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("text/csv").putExtra(Intent.EXTRA_TITLE, "BatteryLens-sessions.csv"), 77);
+        CalibrationStore.requestHistoryAsync(this, (sessions, estimate, rev) -> {
+            if (isGone()) return;
+            if (sessions.isEmpty()) { toast("No sessions to export yet"); return; }
+            pendingCsv = CsvExports.sessions(sessions);
+            awaitingDocumentPicker = true;
+            startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("text/csv").putExtra(Intent.EXTRA_TITLE, "BatteryLens-sessions.csv"), 77);
+        });
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request != 77) return;
-        final String csv = pendingCsv; pendingCsv = null;
+        awaitingDocumentPicker = false;
+        final String csv = pendingCsv;
+        pendingCsv = null;
         if (result != RESULT_OK || data == null || data.getData() == null || csv == null) return;
         final Uri uri = data.getData();
-        new Thread(() -> {
+        AppWorker.execute(() -> {
             boolean success = false;
             try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
                 if (output != null) { output.write(csv.getBytes(StandardCharsets.UTF_8)); success = true; }
             } catch (Exception ignored) { }
             final boolean saved = success;
-            runOnUiThread(() -> toast(saved ? "CSV exported" : "Could not write this file"));
-        }, "battery-csv-export").start();
+            AppWorker.postMain(() -> {
+                if (!isGone()) toast(saved ? "CSV exported" : "Could not write this file");
+            });
+        });
     }
 
     private void saveDesignCapacity() {
@@ -590,6 +979,7 @@ public class MainActivity extends Activity {
             float v = Float.parseFloat(designCapacityInput.getText().toString().trim().replace(',', '.'));
             if (!Float.isFinite(v) || v < 500 || v > 20000) throw new NumberFormatException();
             CalibrationStore.setDesignCapacity(this, v);
+            lastHistoryRevision = -1L;
             toast("Rated capacity saved");
             refreshBattery();
         } catch (Exception e) {
@@ -604,35 +994,90 @@ public class MainActivity extends Activity {
                 toast("Automatic session is already recording");
                 return;
             }
-            CalibrationStore.finishSession(this);
-            toast(CalibrationStore.lastNote(this));
+            CalibrationStore.finishSessionAsync(this, (changed, note) -> {
+                if (!isGone()) { toast(note); refreshBattery(); }
+            });
         } else {
-            boolean started = CalibrationStore.startSession(this, "manual");
-            if (started) { requestNotifications(); BatteryMonitorService.start(this); }
-            toast(started ? "Manual calibration started" : CalibrationStore.lastNote(this));
+            CalibrationStore.startSessionAsync(this, "manual", (started, note) -> {
+                if (isGone()) return;
+                if (started) { requestNotifications(); BatteryMonitorService.start(this); }
+                toast(started ? "Manual calibration started" : note);
+                refreshBattery();
+            });
         }
-        refreshBattery();
     }
 
     private void refreshBattery() {
-        BatteryReadings r = BatteryReadings.read(this);
-        TrendStore.observe(this, r);
-        refreshTrends();
+        refreshBattery(null);
+    }
+
+    private void refreshBattery(Intent batteryIntent) {
+        BatteryReadings r = BatteryReadings.read(this, batteryIntent);
+        lastReadings = r;
+        if (!BatteryMonitorService.running) {
+            TrendStore.observe(this, r);
+        }
+
+        boolean autoEnabled = CalibrationStore.isAutoEnabled(this);
+        int chipState = BatteryMonitorService.running ? 1 : (autoEnabled && BatteryMonitorService.starting ? 2 : 3);
+        if (chipState != lastChipState) {
+            lastChipState = chipState;
+            int chipColor = chipState == 1 ? accent : (chipState == 2 ? accentBlue : warning);
+            int chipFill = Color.argb(38, Color.red(chipColor), Color.green(chipColor), Color.blue(chipColor));
+            int chipStroke = Color.argb(120, Color.red(chipColor), Color.green(chipColor), Color.blue(chipColor));
+            autoChip.setText(chipState == 1 ? "● Live" : (chipState == 2 ? "◐ Starting" : "○ Paused"));
+            autoChip.setBackground(rippleDrawable(chipFill, chipStroke, 16, chipFill));
+            autoChip.setTextColor(chipColor);
+        }
+
+        requestHistoryIfStale();
+        refreshVisiblePage();
+        BatteryWidgetUpdater.updateAllIfPinned(this, r);
+    }
+
+    private void requestHistoryIfStale() {
+        long rev = CalibrationStore.sessionsRevision();
+        float design = CalibrationStore.designCapacity(this);
+        if (historyLoading) return;
+        if (cachedSessions != null && rev == lastHistoryRevision && design == lastHistoryDesign) return;
+        historyLoading = true;
+        CalibrationStore.requestHistoryAsync(this, (sessions, estimate, loadedRev) -> {
+            historyLoading = false;
+            if (isGone()) return;
+            cachedSessions = sessions;
+            cachedEstimate = estimate;
+            lastHistoryRevision = loadedRev;
+            lastHistoryDesign = CalibrationStore.designCapacity(this);
+            refreshVisiblePage();
+            BatteryWidgetUpdater.updateAllIfPinnedAsync(this);
+        });
+    }
+
+    private void refreshVisiblePage() {
+        BatteryReadings r = lastReadings;
+        if (selectedPage == 0 && built[0]) renderOverview(r);
+        else if (selectedPage == 1 && built[1]) refreshTrends();
+        else if (selectedPage == 2 && built[2]) renderSessionsPage();
+        else if (selectedPage == 3 && built[3]) renderDiagnostics(r);
+    }
+
+    private void renderOverview(BatteryReadings r) {
         currentValue.setText(r != null && Double.isFinite(r.currentNowMa()) ? zero.format(r.currentNowMa()) + " mA" : "Unavailable");
         voltageValue.setText(r != null && r.voltageMv > 0 ? String.format(Locale.getDefault(), "%.2f V", r.voltageMv / 1000.0) : "Unavailable");
         float design = CalibrationStore.designCapacity(this);
-        CalibrationStore.Estimate estimate = CalibrationStore.estimate(this);
-        List<CalibrationStore.Session> sessions = CalibrationStore.sessions(this);
+        CalibrationStore.Estimate estimate = cachedEstimate;
 
-        baselineSummary.setText(design > 0 ? "Rated baseline: " + zero.format(design) + " mAh" : "Rated baseline: not set");
-        updatingSwitch = true; autoSwitch.setChecked(CalibrationStore.isAutoEnabled(this)); updatingSwitch = false;
-        autoChip.setText(BatteryMonitorService.running ? "Live" : "Paused");
-        gauge.setLevel(r == null ? -1 : r.soc, r != null && r.isPlugged());
+        baselineSummary.setText(design > 0
+                ? "Rated baseline: " + zero.format(design) + " mAh"
+                : "Rated baseline not set · tap here to configure");
+        baselineSummary.setTextColor(design > 0 ? secondary : accentBlue);
+        updatingSwitch = true;
+        autoSwitch.setChecked(CalibrationStore.isAutoEnabled(this));
+        updatingSwitch = false;
+        if (r == null) gauge.setLevel(-1, false);
+        else gauge.setLevel(r.soc, r.isPlugged(), r.status);
         observedValue.setText(String.format(Locale.getDefault(), "%.2f", CalibrationStore.observedCycles(this)));
         chargeStatus.setText(r == null ? "Battery unavailable" : statusName(r.status) + " · " + plugName(r.plugged));
-        autoChip.setBackground(chipDrawable(CalibrationStore.isAutoEnabled(this) ? accentBlue : warning,
-                CalibrationStore.isAutoEnabled(this) ? accentBlue : warning, 16));
-        autoChip.setTextColor(CalibrationStore.isAutoEnabled(this) ? bg : Color.rgb(47, 34, 0));
 
         if (r == null) {
             healthValue.setText("Learning");
@@ -646,27 +1091,22 @@ public class MainActivity extends Activity {
             cycleExplanation.setText("Device cycle reading unavailable.");
             timeValue.setText("—");
             chargeInfo.setText("Battery data unavailable");
-            screenDrainValue.setText("—"); idleDrainValue.setText("—");
-            runtimeValue.setText("Runtime: unavailable"); dailyStress.setText("Temperature history: unavailable");
-            rawValue.setText("Battery data unavailable.");
+            screenDrainValue.setText("—");
+            idleDrainValue.setText("—");
+            runtimeValue.setText("Runtime: unavailable");
+            dailyStress.setText("Temperature history: unavailable");
             updateAutoStatus(null);
-            updateHistory(sessions, design);
-            chart.setData(sessions, design, healthWindowDays);
             return;
-        }
-
-        Double snapshotFcc = null;
-        if (r.hasUsableCounter() && r.soc >= 10 && r.soc <= 100) {
-            snapshotFcc = (r.chargeUah / 1000.0) / (r.soc / 100.0);
         }
 
         Double selectedHealth = null;
         Double selectedFcc = null;
-        String source = sessions.isEmpty() ? "Collect a monitored charge of 30% or more."
+        String source = cachedSessions == null ? "Loading session history…"
+                : cachedSessions.isEmpty() ? "Collect a monitored charge of 30% or more."
                 : "Earlier estimates are saved in Sessions. Collect new sessions for a checked result.";
         String confidence = "Not enough data";
 
-        if (estimate.fccMah != null) {
+        if (estimate != null && estimate.fccMah != null) {
             selectedFcc = estimate.fccMah;
             boolean ready = estimate.usedCount >= 3 && estimate.relativeMad <= 0.10;
             selectedHealth = ready && design > 0 ? 100.0 * selectedFcc / design : null;
@@ -674,14 +1114,13 @@ public class MainActivity extends Activity {
                     ? "Preliminary capacity: " + estimate.usedCount + " of 3 eligible sessions. Health appears when readings agree."
                     : "Charge sessions disagree. Review Sessions and collect another steady charge."
                     : "Median of " + estimate.usedCount + " eligible sessions. Fuel-gauge estimate, not a lab measurement.";
-            confidence = !ready ? estimate.usedCount < 3 ? "Collect more data" : "Inconsistent"
+            confidence = !ready ? (estimate.usedCount < 3 ? "Collect more data" : "Inconsistent")
                     : estimate.confidence;
         }
 
         if (selectedHealth != null) {
-            double displayHealth = selectedHealth;
-            healthValue.setText(one.format(displayHealth) + "%");
-            healthValue.setTextColor(colorForHealth(displayHealth));
+            healthValue.setText(one.format(selectedHealth) + "%");
+            healthValue.setTextColor(colorForHealth(selectedHealth));
         } else {
             healthValue.setText("Learning");
             healthValue.setTextColor(accent);
@@ -699,16 +1138,33 @@ public class MainActivity extends Activity {
         cycleExplanation.setText((r.cycles >= 0 ? "Device source: " + r.cycleSource + (r.cycles == 0 ? ". Zero may be a firmware placeholder." : ".")
                 : "Lifetime count is not exposed to this app. Check compatibility in Settings.")
                 + "\nObserved cycles count only small, continuous battery-level drops seen by BatteryLens"
-                + (since > 0 ? " since " + shortDate.format(new Date(since)) : "")
+                + (since > 0 ? " since " + formatShortDate(since) : "")
                 + ". They exclude unmonitored time and are not the phone’s lifetime total.");
         timeValue.setText(r.isPlugged() ? formatDuration(r.chargeTimeMs) : "—");
         refreshInsights(r);
-
         updateAutoStatus(r);
-        updateHistory(sessions, design);
-        chart.setData(sessions, design, healthWindowDays);
+    }
 
+    private void renderSessionsPage() {
+        if (cachedSessions == null) return;
+        float design = CalibrationStore.designCapacity(this);
+        updateHistory(cachedSessions, design);
+        chart.setData(cachedSessions, design, healthWindowDays);
+    }
+
+    private void renderDiagnostics(BatteryReadings r) {
+        if (r == null) {
+            rawValue.setText("Battery data unavailable.");
+            return;
+        }
+        float design = CalibrationStore.designCapacity(this);
+        CalibrationStore.Estimate estimate = cachedEstimate;
+        Double snapshotFcc = r.hasUsableCounter() && r.soc >= 10 && r.soc <= 100
+                ? (r.chargeUah / 1000.0) / (r.soc / 100.0) : null;
+        double tempC = r.temperatureC();
+        double powerW = r.batterySidePowerW();
         String model = Build.MODEL == null ? "Unknown" : Build.MODEL;
+
         StringBuilder raw = new StringBuilder();
         raw.append("Model              ").append(model).append('\n');
         raw.append("Android            ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
@@ -724,25 +1180,37 @@ public class MainActivity extends Activity {
         raw.append("Battery-side power ").append(Double.isNaN(powerW) ? "Unsupported" : one.format(powerW) + " W").append('\n');
         raw.append("Energy counter     ").append(r.energyNwh == Long.MIN_VALUE ? "Unsupported" : one.format(r.energyNwh / 1_000_000.0) + " mWh").append('\n');
         raw.append("Cycle count        ").append(r.cycles >= 0 ? r.cycles : "Unsupported").append('\n');
+        if (Build.VERSION.SDK_INT >= 34) {
+            raw.append("Charging policy    ").append(r.chargingStatusExtra >= 0 ? r.chargingStatusExtra : "Unavailable").append('\n');
+        }
+        if (Build.VERSION.SDK_INT >= 36) {
+            raw.append("Capacity level     ").append(capacityLevelName(r.capacityLevelExtra)).append('\n');
+        }
         raw.append("Charge time left   ").append(formatDuration(r.chargeTimeMs)).append('\n');
         raw.append("Device SoH         No stable public API used\n");
         raw.append("Rated baseline     ").append(design > 0 ? zero.format(design) + " mAh" : "Not set").append('\n');
-        raw.append("Checked FCC        ").append(estimate.fccMah != null ? zero.format(estimate.fccMah) + " mAh / " + estimate.usedCount + " sessions" : "Not ready").append('\n');
-        raw.append("Fit variability    ").append(Double.isFinite(estimate.relativeMad) ? one.format(estimate.relativeMad * 100) + "%" : "Unavailable").append('\n');
+        raw.append("Checked FCC        ").append(estimate != null && estimate.fccMah != null ? zero.format(estimate.fccMah) + " mAh / " + estimate.usedCount + " sessions" : "Not ready").append('\n');
+        raw.append("Fit variability    ").append(estimate != null && Double.isFinite(estimate.relativeMad) ? one.format(estimate.relativeMad * 100) + "%" : "Unavailable").append('\n');
         raw.append("Snapshot FCC       ").append(snapshotFcc != null ? zero.format(snapshotFcc) + " mAh" : "Unavailable").append('\n');
         raw.append("Measurement limit  ").append(chargeLimitLabel(CalibrationStore.chosenChargeLimit(this))).append('\n');
-        raw.append("Auto calibration   ").append(CalibrationStore.isAutoEnabled(this) ? "On" : "Off");
-        raw.append("\nCycle source       ").append(r.cycleSource);
-        raw.append("\nObserved cycles    ").append(CalibrationStore.observedCycles(this));
-        raw.append("\nMonitor running    ").append(BatteryMonitorService.running);
-        raw.append("\nNotifications      ").append(getSystemService(android.app.NotificationManager.class).areNotificationsEnabled());
-        raw.append("\nPower saving       ").append(getSystemService(android.os.PowerManager.class).isPowerSaveMode());
-        raw.append("\nBattery exemption  ").append(getSystemService(android.os.PowerManager.class).isIgnoringBatteryOptimizations(getPackageName()));
+        raw.append("Auto calibration   ").append(CalibrationStore.isAutoEnabled(this) ? "On" : "Off").append('\n');
+        raw.append("Cycle source       ").append(r.cycleSource).append('\n');
+        raw.append("Observed cycles    ").append(CalibrationStore.observedCycles(this)).append('\n');
+        raw.append("Monitor running    ").append(BatteryMonitorService.running).append('\n');
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        raw.append("Notifications      ").append(nm != null && nm.areNotificationsEnabled()).append('\n');
+        raw.append("Power saving       ").append(pm != null && pm.isPowerSaveMode()).append('\n');
+        raw.append("Battery exemption  ").append(pm != null && pm.isIgnoringBatteryOptimizations(getPackageName()));
+        String exitNote = CalibrationStore.lastProcessExitNote(this);
+        if (!exitNote.isEmpty()) raw.append("\nLast process exit  ").append(exitNote);
         raw.append("\n\nReadable cycle probes\n").append(CycleReader.cached().details);
         rawValue.setText(raw.toString());
     }
 
     private void refreshInsights(BatteryReadings r) {
+        latestInsightSoc = r.soc;
+        latestInsightPlugged = r.isPlugged();
         double current = r.currentNowMa(), power = r.batterySidePowerW();
         if (!r.isPlugged()) chargeInfo.setText("Unplugged · charging speed unavailable");
         else if (r.status == BatteryManager.BATTERY_STATUS_NOT_CHARGING
@@ -756,7 +1224,7 @@ public class MainActivity extends Activity {
             String speed = power < 2 ? "Very slow" : power < 8 ? "Normal" : "Fast";
             String reason = r.temperatureC() >= 40 ? " · warm battery may slow charging"
                     : r.soc >= 80 ? " · charging may taper near the limit"
-                    : getSharedPreferences(CalibrationStore.PREFS, MODE_PRIVATE).getBoolean("hotspot_marker", false)
+                    : CalibrationStore.prefs(this).getBoolean("hotspot_marker", false)
                     ? " · hotspot marked as active" : "";
             chargeInfo.setText(speed + " battery-side gain · " + one.format(power)
                     + " W (net, not charger input)" + reason);
@@ -765,30 +1233,32 @@ public class MainActivity extends Activity {
         if (!insightsLoading && (cachedInsights == null || revision != lastInsightRevision
                 || now < lastInsightRefresh || now - lastInsightRefresh >= 60_000)) {
             insightsLoading = true;
-            lastInsightRevision = revision;
-            lastInsightRefresh = now;
             TrendStore.requestInsights(this, (analysis, loadedRevision) -> {
-                if (isDestroyed()) return;
                 insightsLoading = false;
+                if (isGone()) return;
                 cachedInsights = analysis;
                 lastInsightRevision = loadedRevision;
                 lastInsightRefresh = System.currentTimeMillis();
-                BatteryReadings latest = BatteryReadings.read(this);
-                if (latest != null) refreshInsights(latest);
+                if (built[0] && selectedPage == 0) renderInsightValues(latestInsightSoc, latestInsightPlugged);
             });
         }
+        renderInsightValues(r.soc, r.isPlugged());
+    }
+
+    private void renderInsightValues(double soc, boolean plugged) {
         InsightAnalysis insights = cachedInsights;
         if (insights == null) {
-            screenDrainValue.setText("Collecting"); idleDrainValue.setText("Collecting");
+            screenDrainValue.setText("Collecting");
+            idleDrainValue.setText("Collecting");
             runtimeValue.setText("Runtime: collecting unplugged observations");
             dailyStress.setText("Temperature history: collecting observations");
             return;
         }
         screenDrainValue.setText(Double.isFinite(insights.screenRate) ? one.format(insights.screenRate) + "%/h" : "Collecting");
         idleDrainValue.setText(Double.isFinite(insights.idleRate) ? one.format(insights.idleRate) + "%/h" : "Collecting");
-        double hours = insights.runtimeHours(r.soc);
-        runtimeValue.setText(r.isPlugged() ? "Runtime: measured while unplugged only"
-                : Double.isFinite(hours) ? "Observed-use runtime: about " + formatDuration((long)(hours * 3_600_000))
+        double hours = insights.runtimeHours(soc);
+        runtimeValue.setText(plugged ? "Runtime: measured while unplugged only"
+                : Double.isFinite(hours) ? "Observed-use runtime: about " + formatDuration((long) (hours * 3_600_000))
                     + " · " + (insights.runtimeWellSampled ? "broader sample" : "early estimate")
                     + " from the last 24h" : "Runtime: collecting unplugged observations");
         dailyStress.setText("Past 24h observed: " + (Double.isFinite(insights.peakTemp)
@@ -803,10 +1273,8 @@ public class MainActivity extends Activity {
 
     private void copyDiagnostics() {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (clipboard == null) {
-            toast("Clipboard unavailable");
-            return;
-        }
+        if (clipboard == null) { toast("Clipboard unavailable"); return; }
+        renderDiagnostics(lastReadings);
         String text = "BatteryLens 3.4 diagnostics\n" + rawValue.getText()
                 + "\nLast calibration note  " + CalibrationStore.lastNote(this);
         clipboard.setPrimaryClip(ClipData.newPlainText("BatteryLens diagnostics", text));
@@ -814,13 +1282,27 @@ public class MainActivity extends Activity {
     }
 
     private void updateAutoStatus(BatteryReadings r) {
-        double gain = r == null || !CalibrationStore.hasActive(this) ? 0 : CalibrationStore.activePeakSoc(this) - CalibrationStore.activeStartSoc(this);
+        double gain = r == null || !CalibrationStore.hasActive(this) ? 0
+                : CalibrationStore.activePeakSoc(this) - CalibrationStore.activeStartSoc(this);
         progress.setProgress((int) Math.max(0, Math.min(30, gain)));
-        boolean notifications = getSystemService(android.app.NotificationManager.class).areNotificationsEnabled();
-        monitorHelp.setText((BatteryMonitorService.running ? "Background monitor running. " : "Background monitor paused. Enable monitoring to follow future charges. ")
+        boolean notifications = areNotificationsAllowed();
+        if (notificationsButton != null) {
+            notificationsButton.setText(notifications ? "Notification settings · Enabled" : "Enable notifications");
+        }
+        String monitorState = BatteryMonitorService.running ? "Background monitor running. "
+                : (CalibrationStore.isAutoEnabled(this) && BatteryMonitorService.starting
+                        ? "Starting background monitor… "
+                        : "Background monitor paused. Enable monitoring to follow future charges. ");
+        String helpSuffix = CalibrationStore.activePaused(this)
+                ? "Charging paused near its protection limit. The app keeps the last charging checkpoint."
+                : gain > 0
+                        ? (gain < 30 ? Math.round(30 - gain) + "% more for the minimum session length." : "Minimum length reached. Unplug when convenient.")
+                        : (CalibrationStore.hasActive(this) && r != null && r.soc >= CalibrationStore.activeStartSoc(this) + 5
+                                ? "Level rose, waiting for device charge counter to advance."
+                                : "Aim for 30%+ gained below your phone's charge limit.");
+        monitorHelp.setText(monitorState
                 + (notifications ? "" : "Notifications are disabled in Android. ")
-                + (CalibrationStore.activePaused(this) ? "Charging paused near its protection limit. The app keeps the last charging checkpoint." :
-                gain > 0 ? (gain < 30 ? Math.round(30 - gain) + "% more for the minimum session length." : "Minimum length reached. Unplug when convenient.") : "Aim for 30%+ gained below your phone's charge limit."));
+                + helpSuffix);
         if (CalibrationStore.hasActive(this)) {
             String src = CalibrationStore.activeSource(this);
             double start = CalibrationStore.activeStartSoc(this);
@@ -847,11 +1329,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String sessionFilterLabel() { return new String[]{"All sessions", "Eligible sessions", "History only"}[sessionFilter]; }
-
     private void updateHistory(List<CalibrationStore.Session> sessions, float design) {
-        if (historySnapshot == sessions && historyFilter == sessionFilter && historyDesign == design) return;
-        historySnapshot = sessions; historyFilter = sessionFilter; historyDesign = design;
+        if (historySnapshot == sessions && historyFilter == sessionFilter && historyDesign == design
+                && sessionList.getChildCount() > 0) return;
+        historySnapshot = sessions;
+        historyFilter = sessionFilter;
+        historyDesign = design;
         int eligible = 0;
         long duration = 0;
         for (CalibrationStore.Session session : sessions) {
@@ -861,29 +1344,56 @@ public class MainActivity extends Activity {
         sessionSummary.setText(sessions.size() + " saved · " + eligible + " eligible · " + formatDuration(duration) + " recorded");
         sessionList.removeAllViews();
         int shown = 0;
+        int tileRipple = Color.argb(44, 109, 235, 209);
         for (int i = sessions.size() - 1; i >= 0; i--) {
             CalibrationStore.Session s = sessions.get(i);
             if (sessionFilter == 1 && !s.used || sessionFilter == 2 && s.used) continue;
             shown++;
-            LinearLayout item = new LinearLayout(this); item.setOrientation(LinearLayout.VERTICAL);
-            item.setPadding(dp(14), dp(14), dp(14), dp(14)); item.setBackground(tileBackground());
-            item.addView(text(shortDate.format(new Date(s.endTime)), 13, secondary, Typeface.NORMAL));
-            item.addView(text(zero.format(s.startSoc) + "% → " + zero.format(s.endSoc) + "%  ·  " + formatDuration(s.durationMs()), 18, primary, Typeface.BOLD), marginTop(6));
-            item.addView(text(s.used ? "Eligible · " + zero.format(s.fccMah) + " mAh" : "History only · " + s.reason.split(" • ")[0], 13, s.used ? accent : warning, Typeface.NORMAL), marginTop(6));
-            item.setFocusable(true); item.setClickable(true);
-            item.setContentDescription(shortDate.format(new Date(s.endTime)) + ", " + Math.round(s.deltaSoc()) + " percentage points gained, " + (s.used ? "eligible" : "history only") + ". Show details");
-            item.setOnClickListener(v -> showSession(s, design));
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.VERTICAL);
+            item.setPadding(dp(14), dp(14), dp(14), dp(14));
+            item.setBackground(rippleDrawable(surface, stroke, 16, tileRipple));
+
+            LinearLayout topRow = new LinearLayout(this);
+            topRow.setGravity(Gravity.CENTER_VERTICAL);
+            String formattedDate = formatShortDate(s.endTime);
+            TextView dateLabel = text(formattedDate, 12, secondary, Typeface.NORMAL);
+            topRow.addView(dateLabel, weightedParams(1, 0));
+            int badgeColor = s.used ? accent : warning;
+            int deltaGain = Math.round((float) s.deltaSoc());
+            TextView deltaBadge = text((deltaGain >= 0 ? "+" : "") + deltaGain + "%", 11, badgeColor, Typeface.BOLD);
+            deltaBadge.setFontFeatureSettings("tnum");
+            deltaBadge.setPadding(dp(8), dp(3), dp(8), dp(3));
+            deltaBadge.setBackground(chipDrawable(
+                    Color.argb(34, Color.red(badgeColor), Color.green(badgeColor), Color.blue(badgeColor)),
+                    Color.argb(90, Color.red(badgeColor), Color.green(badgeColor), Color.blue(badgeColor)), 10));
+            topRow.addView(deltaBadge);
+            item.addView(topRow);
+
+            TextView headline = text(zero.format(s.startSoc) + "% → " + zero.format(s.endSoc) + "%  ·  " + formatDuration(s.durationMs()), 17, primary, Typeface.BOLD);
+            headline.setFontFeatureSettings("tnum");
+            item.addView(headline, marginTop(6));
+            item.addView(text(s.used ? "Eligible · " + zero.format(s.fccMah) + " mAh" : "History only · " + s.reason.split(" • ")[0], 13, badgeColor, s.used ? Typeface.BOLD : Typeface.NORMAL), marginTop(5));
+            item.setFocusable(true);
+            item.setClickable(true);
+            item.setContentDescription(formattedDate + ", " + Math.round(s.deltaSoc()) + " percentage points gained, " + (s.used ? "eligible" : "history only") + ". Show details");
+            item.setOnClickListener(v -> showSession(s));
             sessionList.addView(item, marginTop(10));
         }
         historyValue.setVisibility(shown == 0 ? View.VISIBLE : View.GONE);
         historyValue.setText(sessions.isEmpty() ? "No completed sessions yet. Enable monitoring and charge normally to start your journal." : "No sessions match this filter.");
     }
 
-    private void showSession(CalibrationStore.Session s, float design) {
+    private String formatShortDate(long millis) {
+        tempDate.setTime(millis);
+        return shortDate.format(tempDate);
+    }
+
+    private void showSession(CalibrationStore.Session s) {
         double charged = s.endUah > s.startUah && s.startUah > 0 ? (s.endUah - s.startUah) / 1000.0 : Double.NaN;
         double energyWh = Double.isFinite(charged) && s.startVoltageMv > 0 && s.endVoltageMv > 0
                 ? charged * (s.startVoltageMv + s.endVoltageMv) / 2_000_000.0 : Double.NaN;
-        String detail = shortDate.format(new Date(s.startTime)) + " → " + shortDate.format(new Date(s.endTime))
+        String detail = formatShortDate(s.startTime) + " → " + formatShortDate(s.endTime)
                 + "\n\nLevel: " + one.format(s.startSoc) + "% → " + one.format(s.endSoc) + "%"
                 + "\nDuration: " + formatDuration(s.durationMs())
                 + "\nNet charge added: " + (Double.isFinite(charged) ? zero.format(charged) + " mAh" : "Unavailable")
@@ -902,6 +1412,10 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Charging session").setMessage(detail).setPositiveButton("Done", null).show();
     }
 
+    private boolean isGone() {
+        return isFinishing() || isDestroyed();
+    }
+
     private int colorForHealth(double health) {
         if (health >= 90) return accent;
         if (health >= 80) return warning;
@@ -914,6 +1428,18 @@ public class MainActivity extends Activity {
         if (c < 40) return "Warm";
         if (c < 45) return "Hot";
         return "Very hot";
+    }
+
+    private String capacityLevelName(int level) {
+        switch (level) {
+            case BatteryManager.BATTERY_CAPACITY_LEVEL_CRITICAL: return "Critical";
+            case BatteryManager.BATTERY_CAPACITY_LEVEL_LOW: return "Low";
+            case BatteryManager.BATTERY_CAPACITY_LEVEL_NORMAL: return "Normal";
+            case BatteryManager.BATTERY_CAPACITY_LEVEL_HIGH: return "High";
+            case BatteryManager.BATTERY_CAPACITY_LEVEL_FULL: return "Full";
+            case BatteryManager.BATTERY_CAPACITY_LEVEL_UNKNOWN: return "Unknown";
+            default: return "Unsupported";
+        }
     }
 
     private String healthName(int h) {
@@ -954,6 +1480,87 @@ public class MainActivity extends Activity {
         return (min / 60) + "h " + (min % 60) + "m";
     }
 
+    private interface OnSegmentSelect {
+        void onSelect(int index);
+    }
+
+    private LinearLayout segmentedBar(String[] labels, int initialIndex, OnSegmentSelect listener) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(dp(4), dp(4), dp(4), dp(4));
+        bar.setBackground(chipDrawable(surface, stroke, 14));
+        for (int i = 0; i < labels.length; i++) {
+            final int index = i;
+            TextView pill = text(labels[i], 12, secondary, Typeface.NORMAL);
+            pill.setGravity(Gravity.CENTER);
+            pill.setSingleLine(true);
+            pill.setEllipsize(TextUtils.TruncateAt.END);
+            pill.setMinHeight(dp(40));
+            pill.setPadding(dp(6), dp(8), dp(6), dp(8));
+            pill.setClickable(true);
+            pill.setFocusable(true);
+            pill.setOnClickListener(v -> {
+                updateSegmentedBar(bar, index);
+                listener.onSelect(index);
+            });
+            bar.addView(pill, weightedParams(1, i == 0 ? 0 : 4));
+        }
+        updateSegmentedBar(bar, Math.max(0, Math.min(labels.length - 1, initialIndex)));
+        return bar;
+    }
+
+    private void updateSegmentedBar(LinearLayout bar, int selectedIndex) {
+        int activeFill = Color.argb(38, 109, 235, 209);
+        int activeStroke = Color.argb(120, 109, 235, 209);
+        int rippleColor = Color.argb(48, 109, 235, 209);
+        for (int i = 0; i < bar.getChildCount(); i++) {
+            TextView pill = (TextView) bar.getChildAt(i);
+            boolean active = i == selectedIndex;
+            pill.setSelected(active);
+            pill.setTextColor(active ? accent : secondary);
+            pill.setTypeface(active ? SANS_BOLD : SANS_REGULAR);
+            pill.setBackground(rippleDrawable(active ? activeFill : Color.TRANSPARENT,
+                    active ? activeStroke : Color.TRANSPARENT, 10, rippleColor));
+        }
+    }
+
+    private View hairlineDivider() {
+        View v = new View(this);
+        v.setBackgroundColor(stroke);
+        v.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1))));
+        return v;
+    }
+
+    private TextView eyebrow(String title) {
+        TextView t = text(title, 11, accent, Typeface.BOLD);
+        t.setLetterSpacing(0.08f);
+        return t;
+    }
+
+    private void styleSwitch(Switch s) {
+        int[][] states = {{android.R.attr.state_checked}, {}};
+        s.setThumbTintList(new ColorStateList(states, new int[]{accent, secondary}));
+        s.setTrackTintList(new ColorStateList(states, new int[]{
+                Color.argb(110, 109, 235, 209),
+                stroke
+        }));
+    }
+
+    private void styleProgressBar(ProgressBar bar) {
+        GradientDrawable track = new GradientDrawable();
+        track.setColor(surface);
+        track.setCornerRadius(dp(6));
+        track.setStroke(dp(1), stroke);
+        GradientDrawable fill = new GradientDrawable();
+        fill.setColor(accent);
+        fill.setCornerRadius(dp(6));
+        ClipDrawable clip = new ClipDrawable(fill, Gravity.START, ClipDrawable.HORIZONTAL);
+        LayerDrawable layers = new LayerDrawable(new Drawable[]{track, clip});
+        layers.setId(0, android.R.id.background);
+        layers.setId(1, android.R.id.progress);
+        bar.setProgressDrawable(layers);
+    }
+
     private LinearLayout metricRow() {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.HORIZONTAL);
@@ -964,8 +1571,8 @@ public class MainActivity extends Activity {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
         l.setPadding(dp(16), dp(16), dp(16), dp(16));
-        l.setBackground(cardBackground(elevated ? cardElevated : card));
-        l.setElevation(dp(elevated ? 3 : 1));
+        l.setBackground(cardBackground(elevated ? cardElevated : card, elevated ? heroStroke : stroke));
+        l.setElevation(dp(elevated ? 4 : 1));
         return l;
     }
 
@@ -976,6 +1583,7 @@ public class MainActivity extends Activity {
         l.setBackground(tileBackground());
         TextView name = text(label, 12, secondary, Typeface.NORMAL);
         TextView value = text("—", 18, primary, Typeface.BOLD);
+        value.setFontFeatureSettings("tnum");
         value.setLineSpacing(0f, 1.1f);
         l.addView(name);
         l.addView(value, marginTop(4));
@@ -983,9 +1591,12 @@ public class MainActivity extends Activity {
     }
 
     private TextView chip(String value, int fill) {
-        TextView t = text(value, 12, bg, Typeface.BOLD);
-        t.setPadding(dp(10), dp(6), dp(10), dp(6));
-        t.setBackground(chipDrawable(fill, fill, 16));
+        TextView t = text(value, 12, fill, Typeface.BOLD);
+        t.setFontFeatureSettings("tnum");
+        t.setPadding(dp(12), dp(8), dp(12), dp(8));
+        int tint = Color.argb(38, Color.red(fill), Color.green(fill), Color.blue(fill));
+        int border = Color.argb(120, Color.red(fill), Color.green(fill), Color.blue(fill));
+        t.setBackground(rippleDrawable(tint, border, 16, tint));
         return t;
     }
 
@@ -994,7 +1605,7 @@ public class MainActivity extends Activity {
         t.setText(value);
         t.setTextSize(sp);
         t.setTextColor(color);
-        t.setTypeface(Typeface.create("sans-serif", style));
+        t.setTypeface(style == Typeface.BOLD ? SANS_BOLD : SANS_REGULAR);
         return t;
     }
 
@@ -1004,9 +1615,11 @@ public class MainActivity extends Activity {
         b.setTextColor(bg);
         b.setTextSize(14);
         b.setAllCaps(false);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setBackground(chipDrawable(accent, accent, 14));
-        b.setPadding(dp(12), dp(10), dp(12), dp(10));
+        b.setLetterSpacing(0.01f);
+        b.setStateListAnimator(null);
+        b.setTypeface(SANS_BOLD);
+        b.setBackground(rippleDrawable(accent, accent, 14, Color.argb(60, 9, 20, 26)));
+        b.setPadding(dp(14), dp(10), dp(14), dp(10));
         b.setMinHeight(dp(48));
         return b;
     }
@@ -1017,18 +1630,25 @@ public class MainActivity extends Activity {
         b.setTextColor(primary);
         b.setTextSize(13);
         b.setAllCaps(false);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setBackground(chipDrawable(surface, stroke, 14));
-        b.setPadding(dp(12), dp(10), dp(12), dp(10));
+        b.setLetterSpacing(0.01f);
+        b.setStateListAnimator(null);
+        b.setTypeface(SANS_BOLD);
+        b.setBackground(rippleDrawable(surface, stroke, 14, Color.argb(44, 109, 235, 209)));
+        b.setPadding(dp(14), dp(10), dp(14), dp(10));
         b.setMinHeight(dp(48));
         return b;
     }
 
-    private GradientDrawable cardBackground(int fillColor) {
+    private RippleDrawable rippleDrawable(int fillColor, int strokeColor, int radiusDp, int rippleColor) {
+        return new RippleDrawable(ColorStateList.valueOf(rippleColor),
+                chipDrawable(fillColor, strokeColor, radiusDp), null);
+    }
+
+    private GradientDrawable cardBackground(int fillColor, int strokeColor) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(fillColor);
-        d.setCornerRadius(dp(24));
-        d.setStroke(dp(1), stroke);
+        d.setCornerRadius(dp(22));
+        d.setStroke(dp(1), strokeColor);
         return d;
     }
 
@@ -1057,8 +1677,12 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams marginTop(int dpValue) {
+        return marginTop(dpValue, ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private LinearLayout.LayoutParams marginTop(int dpValue, int heightPx) {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.MATCH_PARENT, heightPx);
         p.topMargin = dp(dpValue);
         return p;
     }
